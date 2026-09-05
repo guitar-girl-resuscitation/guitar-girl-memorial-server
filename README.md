@@ -1,15 +1,125 @@
 # Guitar Girl Fan Memorial Server
 
-Rust interoperability implementation of the local, built-in server for the Guitar Girl Fan Memorial Build, informed by client analysis and protocol evidence.
+English · [简体中文](README.zh-CN.md)
 
-The legacy `reborn-server` is protocol evidence only. New behavior belongs here after it is expressed as a documented contract and a regression test.
+**Welcome home, Lily!** An embedded Rust server for the unofficial Guitar Girl Fan Memorial Build: local gameplay and persistent, isolated saves without a continuously running remote backend.
 
-## Non-negotiable invariants
+This repository builds a server component, **not an installable game**. Players should start with the [Patcher](https://github.com/guitar-girl-resuscitation/guitar-girl-memorial-patcher#for-players).
 
-- One save slot has one immutable positive USN (`U_seq`) and one immutable numeric-string `U_id`.
-- Every player-owned database row is keyed by USN. No global player state exists.
-- A slot switch is pending until the client returns to the title/login flow. An active RPC session never changes USN.
-- Calendar behavior derives from device Unix time plus the device UTC offset supplied on launch. The server need not remain alive while the game is closed.
-- Mutations are transactional and reject an identity different from the session USN.
+## The three repositories
 
-Run the core tests with `cargo test`.
+| Repository | Responsibility |
+| --- | --- |
+| [Server](https://github.com/guitar-girl-resuscitation/guitar-girl-memorial-server) | Rust gameplay, protocol, SQLite saves and the Android server library |
+| [Patch](https://github.com/guitar-girl-resuscitation/guitar-girl-memorial-patch) | Original client integration, memorial UI, identity isolation and verified transformation rules |
+| [Patcher](https://github.com/guitar-girl-resuscitation/guitar-girl-memorial-patcher) | CLI/web packaging, source verification, resource extraction, signing and downloads |
+
+At runtime, the patched Unity client talks to the embedded Rust server over authenticated loopback. The patching website is **not** a game server and does not need to stay online for play.
+
+## Architecture
+
+```text
+Unity client → Patch → authenticated local HTTP / Thrift
+                         ↓
+                    Rust handlers
+                    ├─ SQLite: USN-scoped player state
+                    ├─ master.sqlite: extracted from the user's package
+                    └─ Android AssetManager: original in-package resources
+```
+
+| Crate | Purpose |
+| --- | --- |
+| `protocol` | Typed wire contracts, envelopes and codecs |
+| `domain` | Gameplay models and explicit business behavior |
+| `persistence-sqlite` | Transactions, migrations, identity isolation and recovery |
+| `master-data` | Read-only client-derived master data |
+| `policy-memorial` | Versioned memorial balance rules |
+| `transport-http` | Local HTTP and game/PMang compatibility routes |
+| `android-ffi` | Stable C ABI used by the client bootstrap |
+| `server-cli` | Desktop protocol/debugging host |
+| `contract-tests` | Wire and behavior regression tests |
+
+### Save and time guarantees
+
+- Each save slot has an immutable positive USN (`U_seq`) and numeric-string `U_id`. Player-owned rows are USN-scoped.
+- A login session binds its identity. Writes with the wrong identity or stale sequence are rejected.
+- Purchases, reward claims and mail delivery/claiming use transactions and idempotency keys; success follows the database commit.
+- Slot switching records a pending selection. The current Unity session must end before another identity and its client key namespace are activated.
+- SQLite uses WAL, foreign keys and durable writes. Shutdown/recovery safeguards are described in the architecture document.
+- Timers use absolute timestamps. Calendar behavior uses device Unix time and UTC offset, not server uptime. Closing the game does not require a background daemon.
+
+Fresh memorial saves are the supported starting point; do not assume old experimental or official cloud saves can be imported.
+
+## Memorial rules
+
+The authoritative values live in [the versioned policy](policy/memorial-policy.json), shared with Patch and checked by fingerprint.
+
+- Selected upgrade/fan thresholds are reduced to 0.1×; the first fan level and skill unlock level requirements are preserved.
+- Only fan-club and accumulated-likes achievements receive reduced requirements, not login-day or all achievement counters.
+- Actual CH1/CH2 likes and CH2 note production are not scaled down.
+- Candy/chocolate upgrades follow a rising curve with a final cap between 10 and 20, depending on the original cost category.
+- Purchasable clothes/guitars cost 10 in their original currency; like-priced unlocks follow the progression policy. Story, pass and legacy reward sources remain distinct.
+- Non-default CH1 clothes/guitars use 30%/20% bonuses; CH2 uses each category's original maximum.
+- Skill cooldowns are 0.1×, reset is five minutes, and encore starts at one hour with level-based reductions.
+- Affection thresholds remain original; CH3 rewards are accelerated. CH3 energy capacity is 200 and regeneration is one point per second.
+- Passes rotate daily by device-local date; manual selection resets the save's rotation anchor. Free and star-tier claims are stored separately.
+- Legacy-item mail contains one item per message and rejects already-owned or already-pending unique items.
+
+## Build and test
+
+Use the toolchain pinned in CI (currently Rust 1.96.0), Python 3.11+ for build tools, and Git. Keep compilation bounded on memory-constrained machines.
+
+```sh
+git clone https://github.com/guitar-girl-resuscitation/guitar-girl-memorial-server
+cd guitar-girl-memorial-server
+cargo test --workspace --locked -j2
+cargo build --locked --release -j2 -p ggfm-server
+```
+
+### Desktop debug server
+
+Provide a `master.sqlite` generated by Patcher from your supported original package. It is deliberately not shipped in this repository.
+
+```sh
+export GGFM_MASTER_SQLITE=/absolute/private/master.sqlite
+export GGFM_DATABASE=/absolute/private/ggfm.sqlite3
+# Optional: inject an ephemeral local session token through your environment.
+export RUST_LOG=info
+./target/release/ggfm-server
+```
+
+PowerShell uses `$env:GGFM_MASTER_SQLITE = 'C:/private/master.sqlite'` and `.\target\release\ggfm-server.exe`.
+
+The CLI prints the dynamically allocated loopback endpoint and shuts down on Ctrl-C. It uses UTC for its debug clock and does not provide Android AssetManager resources; it is not a drop-in complete Android game host. Android supplies device time and resource access through the bootstrap.
+
+### Android library
+
+Install NDK 27.3.13750724 and the Rust Android target:
+
+```sh
+rustup target add aarch64-linux-android
+python tools/build_android.py --ndk "$ANDROID_HOME/ndk/27.3.13750724"
+```
+
+The Android release artifact exposes `libggfm_server.so`. Its ABI contract is [include/ggfm_server.h](include/ggfm_server.h), including start/endpoint/login/log-drain/shutdown operations. Patch and Server must agree on ABI and policy fingerprint.
+
+## Releases and integration
+
+[Releases](https://github.com/guitar-girl-resuscitation/guitar-girl-memorial-server/releases) provide compiled components and SHA-256 verification files. Successful main builds replace the single moving `nightly` release; version tags produce versioned releases. Nightly is not an immutable version: record the exact source commit and artifact digest.
+
+Use the Server version recorded in the chosen Patch release's `dependencies.json`. Do not independently download two moving Nightlies and assume they match. Patcher consumes precompiled artifacts, not an on-demand Rust build for every visitor.
+
+## Further reading
+
+- [Architecture and save invariants](docs/ARCHITECTURE.md)
+- [Protocol contracts and evidence boundaries](docs/PROTOCOL.md)
+- [Reward consumption contract](docs/CONSUME_REWARD_CONTRACT.md)
+- [Release process](docs/RELEASING.md)
+
+## Scope, contributions and licensing
+
+This is an unofficial fan memorial/interoperability project, not an official service or an endorsement by the original developers or publisher. It does not recover official accounts, cloud saves, payments or retired online services. Some historical server-only values are memorial compatibility choices, not a claim of complete original-server fidelity.
+
+Project code is licensed under [AGPL-3.0-or-later](LICENSE); third-party components retain their own licenses. This does not license the original game. Supply only an original package you are entitled to use.
+
+Do not submit APK/XAPK files, AssetBundles, original DEX/IL2CPP binaries, full decompiler exports, captured proprietary master tables, private saves or signing secrets. Report bugs with the component version/commit, chapter, reproducible steps and redacted diagnostic logs. For behavior changes, add a contract/regression test and keep both README languages in sync.
