@@ -726,7 +726,7 @@ pub async fn execute(
                 .database
                 .execute(move |database| database.player_snapshot(usn))
                 .await?;
-            Some(player_response(spec, &snapshot)?)
+            Some(player_response(spec, &snapshot, clock)?)
         }
         "userLoad" => {
             let usn = session.identity.usn;
@@ -735,7 +735,7 @@ pub async fn execute(
                 .execute(move |database| database.player_snapshot(usn))
                 .await?;
             let include_area = request.string("Type") != Some("buff");
-            Some(player_response_projected(spec, &snapshot, include_area)?)
+            Some(player_response_projected(spec, &snapshot, include_area, clock)?)
         }
         "getChoiceUser" => {
             let usn = session.identity.usn;
@@ -3523,14 +3523,16 @@ async fn record_noop(state: &AppState, mutation: RpcMutation) -> Result<(), Game
 fn player_response(
     spec: &ggfm_protocol::RpcSpec,
     snapshot: &PlayerSnapshot,
+    clock: DeviceClock,
 ) -> Result<Value, ggfm_protocol::ProtocolEnvelopeError> {
-    player_response_projected(spec, snapshot, true)
+    player_response_projected(spec, snapshot, true, clock)
 }
 
 fn player_response_projected(
     spec: &ggfm_protocol::RpcSpec,
     snapshot: &PlayerSnapshot,
     include_area: bool,
+    clock: DeviceClock,
 ) -> Result<Value, ggfm_protocol::ProtocolEnvelopeError> {
     tracing::debug!(usn = snapshot.identity.usn, samseck = snapshot.samseck_step,
         guide_stage = snapshot.follower_quests.last().map(|row| row.current_id),
@@ -3646,7 +3648,7 @@ fn player_response_projected(
     // struct, and omits Area_data.  Re-sending the complete contents tree here
     // makes several screens replay their initialization path.
     let contents = if include_area {
-        user_contents(snapshot)?
+        user_contents(snapshot, clock)?
     } else {
         sparse_struct_value(schema, "user_model", "UserContentsData", std::iter::empty())?
     };
@@ -3682,7 +3684,7 @@ fn user_login_identity_response(
     response_sparse_struct(spec, schema, [("User".into(), user)])
 }
 
-fn user_contents(snapshot: &PlayerSnapshot) -> Result<Value, ggfm_protocol::ProtocolEnvelopeError> {
+fn user_contents(snapshot: &PlayerSnapshot, clock: DeviceClock) -> Result<Value, ggfm_protocol::ProtocolEnvelopeError> {
     let schema = ProtocolSchema::embedded();
     let levels: BTreeMap<_, _> = snapshot
         .content_levels
@@ -3852,6 +3854,7 @@ fn user_contents(snapshot: &PlayerSnapshot) -> Result<Value, ggfm_protocol::Prot
         &by_kind,
         tutorials,
         snapshot,
+        clock,
     )
 }
 
@@ -3861,6 +3864,7 @@ fn response_contents(
     by_kind: &BTreeMap<ContentKind, Vec<Value>>,
     tutorials: Vec<Value>,
     snapshot: &PlayerSnapshot,
+    clock: DeviceClock,
 ) -> Result<Value, ggfm_protocol::ProtocolEnvelopeError> {
     let mut overrides = Vec::new();
     for (field, kind) in fields {
@@ -4071,8 +4075,11 @@ fn response_contents(
             values: quests,
         },
     ));
-    let active_at = snapshot.pass.anchor.anchor_day * 86_400
-        - i64::from(snapshot.pass.anchor.utc_offset_minutes) * 60;
+    let active_season = pass_season(clock, snapshot.pass.anchor.anchor_day, snapshot.pass.anchor.anchor_season);
+    // Match getGameDataList's device-local daily rotation, not the original
+    // selection anchor. The subscription also starts in the current day.
+    let active_at = clock.local_epoch_day() * 86_400
+        - i64::from(clock.utc_offset_minutes) * 60;
     let subscriptions = snapshot
         .pass
         .premium_seasons
@@ -4080,7 +4087,7 @@ fn response_contents(
         // Entitlement is retained for every season, but the stock client
         // expects User_subscribe_list to describe the currently active pass,
         // not thirteen simultaneous subscriptions.
-        .filter(|season| **season == snapshot.pass.anchor.anchor_season)
+        .filter(|season| **season == active_season)
         .map(|season| subscribe_wire_value(*season, active_at))
         .collect::<Result<Vec<_>, _>>()?;
     overrides.push((
@@ -5405,6 +5412,29 @@ mod tests {
     }
 
     #[test]
+    fn daily_pass_subscription_matches_master_for_every_season_and_offset() {
+        let mut db = Database::open_memory().unwrap();
+        let identity = db.ensure_default_slot(1_788_360_000).unwrap();
+        db.begin_login(b"pass-regression", DeviceClock::new(1_788_360_000, 0).unwrap()).unwrap();
+        let mut snapshot = db.player_snapshot(identity.usn).unwrap();
+        for offset in [-720, 0, 600, 840] {
+            let start = DeviceClock::new(1_788_360_000, offset).unwrap();
+            snapshot.pass.anchor.anchor_day = start.local_epoch_day();
+            snapshot.pass.anchor.anchor_season = 1;
+            for elapsed in 0..26 {
+                let clock = DeviceClock::new(start.unix_seconds + elapsed * 86_400, offset).unwrap();
+                let current = pass_season(clock, snapshot.pass.anchor.anchor_day, 1);
+                let Value::Struct(fields) = user_contents(&snapshot, clock).unwrap() else { panic!() };
+                let descriptor = ProtocolSchema::embedded().type_spec("user_model::UserContentsData").unwrap();
+                let id = descriptor.fields.iter().find(|f| f.name == "User_subscribe_list").unwrap().id;
+                let Value::List { values, .. } = &fields.iter().find(|f| f.id == id).unwrap().value else { panic!() };
+                let midnight = clock.local_epoch_day() * 86_400 - i64::from(offset) * 60;
+                assert_eq!(values, &vec![subscribe_wire_value(current, midnight).unwrap()]);
+            }
+        }
+    }
+
+    #[test]
     fn buff_user_load_matches_the_captured_narrow_projection() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5422,7 +5452,7 @@ mod tests {
         let snapshot = database.player_snapshot(identity.usn).unwrap();
         let spec = ProtocolSchema::embedded().call("userLoad").unwrap();
 
-        let Value::Struct(fields) = player_response_projected(spec, &snapshot, false).unwrap()
+        let Value::Struct(fields) = player_response_projected(spec, &snapshot, false, DeviceClock::new(1_788_360_000, 0).unwrap()).unwrap()
         else {
             panic!("userLoad response is not a struct");
         };

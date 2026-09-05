@@ -726,7 +726,9 @@ impl Database {
             })?
             .collect::<Result<_, _>>()?;
         let mut area_statement = self.connection.prepare(concat!(
-            "SELECT area,area_level,fans,candy,current_costume,current_guitar,current_music,gp,unlocked ",
+            "SELECT area,area_level,fans,CASE WHEN area=1 THEN ",
+            "(SELECT amount FROM currencies WHERE usn=area_state.usn AND kind='candy') ",
+            "ELSE candy END,current_costume,current_guitar,current_music,gp,unlocked ",
             "FROM area_state WHERE usn=?1 ORDER BY area"
         ))?;
         let areas = area_statement
@@ -2053,7 +2055,9 @@ impl Database {
                         area.area,
                         area.fan_level,
                         area.fans.filter(|value| *value >= 0).map(|value| value as f64),
-                        area.candy.filter(|value| value.is_finite() && *value >= 0.0),
+                        // CH1 candy is transaction-owned. A client area snapshot
+                        // is not a reward or purchase and must not overwrite it.
+                        area.candy.filter(|value| area.area != 1 && value.is_finite() && *value >= 0.0),
                         area.current_costume,
                         area.current_guitar,
                         area.current_music
@@ -2077,16 +2081,6 @@ impl Database {
                     tx.execute(
                         "UPDATE currencies SET amount=MAX(amount,?1) WHERE usn=?2 AND kind='fans'",
                         params![value as f64, mutation.identity.usn],
-                    )?;
-                }
-                if let Some(value) = area
-                    .candy
-                    .filter(|value| value.is_finite() && *value >= 0.0)
-                    && area.area == 1
-                {
-                    tx.execute(
-                        "UPDATE currencies SET amount=?1 WHERE usn=?2 AND kind='candy'",
-                        params![value, mutation.identity.usn],
                     )?;
                 }
                 if area.area == 1
@@ -4679,12 +4673,12 @@ mod tests {
         let snapshot = db.player_snapshot(identity.usn).unwrap();
         assert_eq!(snapshot.currency(CurrencyKind::Ch1Like), 10.0);
         assert_eq!(snapshot.currency(CurrencyKind::Ch2Like), 200.0);
-        assert_eq!(snapshot.currency(CurrencyKind::Candy), 5.0);
+        assert_eq!(snapshot.currency(CurrencyKind::Candy), 0.0);
         assert_eq!(snapshot.currency(CurrencyKind::Fans), 500.0);
         assert_eq!(snapshot.fan_level, 1);
         assert_eq!(snapshot.areas[0].fans, 40.0);
         assert_eq!(snapshot.areas[0].area_level, 1);
-        assert_eq!(snapshot.areas[0].candy, 5.0);
+        assert_eq!(snapshot.areas[0].candy, 0.0);
         assert_eq!(snapshot.areas[1].fans, 500.0);
         assert_eq!(snapshot.areas[1].area_level, 3);
         assert_eq!(snapshot.areas[1].candy, 75.0);
@@ -4849,6 +4843,73 @@ mod tests {
             .unwrap();
         assert_eq!(duplicate.status, "N");
         assert_eq!(duplicate.attendance_count, 1);
+    }
+
+    #[test]
+    fn candy_rewards_preserve_balance_across_shop_encore_mail_pass_and_save() {
+        let (mut db, identity) = setup();
+        let session = db.begin_login(b"candy-regression", DeviceClock::new(700, 0).unwrap()).unwrap();
+        db.grant_currency(identity.usn, CurrencyKind::Candy, 180.0, "initial-candy", 700).unwrap();
+        let mutation = |seq, rpc: &str| RpcMutation {
+            nonce: session.nonce, identity: identity.clone(), request_seq: seq,
+            rpc: rpc.into(), idempotency_key: format!("candy:{seq}"), committed_at: 700 + seq,
+        };
+        let candy = RewardGrant { reward_type: 1, reward_id: 2, amount: 30.0 };
+        for (seq, rewards, expected) in [
+            (1, vec![RewardGrant { reward_type: 1, reward_id: 1, amount: 100.0 }], 180.0),
+            (2, vec![candy.clone()], 210.0),
+            (3, vec![candy.clone()], 240.0),
+        ] {
+            let command = || RewardPurchaseCommand {
+                transaction_id: format!("shop:{seq}"), purchase_kind: "shop".into(),
+                target_id: seq, cost: None, rewards: rewards.clone(), ad_progression: None,
+            };
+            let result = db.purchase_rewards(&mutation(seq, "buyShop"), command()).unwrap();
+            assert_eq!(result.candy, expected);
+            assert_eq!(db.purchase_rewards(&mutation(seq, "buyShop"), command()).unwrap().candy, expected);
+        }
+        let encore = mutation(4, "getMusicGift");
+        db.claim_music_encore_rewards(&encore, vec![(1, 7, 0, 5000)], vec![]).unwrap();
+        db.claim_music_encore_rewards(&encore, vec![(1, 7, 0, 5000)], vec![]).unwrap();
+        assert_eq!(db.currency(identity.usn, CurrencyKind::Candy).unwrap(), 247.0);
+        db.queue_mail(identity.usn, 700, "test", "test", &Reward::Currency {
+            currency: CurrencyKind::Candy, amount: 11.0,
+        }, 705).unwrap();
+        db.claim_mail_rpc(&mutation(5, "providePost"), 700).unwrap();
+        db.claim_mail_rpc(&mutation(5, "providePost"), 700).unwrap();
+        assert_eq!(db.currency(identity.usn, CurrencyKind::Candy).unwrap(), 258.0);
+        for season in 1..=13 {
+            let claim = mutation(5 + season, "setPassReward");
+            db.claim_pass_reward(&claim, season, 0, 1, 1, 0, &[candy.clone()], 32, 0).unwrap();
+            db.claim_pass_reward(&claim, season, 0, 1, 1, 0, &[candy.clone()], 32, 0).unwrap();
+        }
+        let expected = 648.0;
+        for (seq, stale) in [(19, 0.0), (20, 30.0), (21, 9999.0)] {
+            let patch = UserSavePatch { areas: vec![ggfm_domain::AreaSavePatch {
+                area: 1, candy: Some(stale), ..Default::default()
+            }], ..Default::default() };
+            db.merge_user_save(&mutation(seq, "userSave"), &patch, "test", 10, &[]).unwrap();
+            let snapshot = db.player_snapshot(identity.usn).unwrap();
+            assert_eq!(snapshot.currency(CurrencyKind::Candy), expected);
+            assert_eq!(snapshot.areas.iter().find(|area| area.area == 1).unwrap().candy, expected);
+        }
+        // Legitimate spending still reduces the authoritative balance.
+        db.purchase_rewards(&mutation(22, "buyShop"), RewardPurchaseCommand {
+            transaction_id: "spend-candy".into(), purchase_kind: "shop".into(), target_id: 1,
+            cost: Some((CurrencyKind::Candy, 10.0)), rewards: vec![], ad_progression: None,
+        }).unwrap();
+        assert_eq!(db.player_snapshot(identity.usn).unwrap().areas[0].candy, expected - 10.0);
+        let other = db.create_slot("Other", 730).unwrap();
+        let before = db.player_snapshot(identity.usn).unwrap();
+        let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let backup = std::env::temp_dir().join(format!("ggfm-candy-upgrade-{suffix}.sqlite"));
+        db.backup_to(&backup).unwrap();
+        let restored = Database::open(&backup).unwrap();
+        assert_eq!(restored.player_snapshot(identity.usn).unwrap(), before);
+        assert_eq!(restored.currency(other.usn, CurrencyKind::Candy).unwrap(), 0.0);
+        assert_eq!(restored.connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 4);
+        drop(restored);
+        std::fs::remove_file(backup).unwrap();
     }
 
     #[test]
