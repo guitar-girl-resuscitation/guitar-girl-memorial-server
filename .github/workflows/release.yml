@@ -36,7 +36,7 @@ jobs:
       - name: Build desktop server
         run: cargo build --locked --release -j2 -p ggfm-server
       - name: Android NDK
-        run: sdkmanager "ndk;27.3.13750724"
+        run: '"$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "ndk;27.3.13750724"'
       - name: Build Android server
         run: python tools/build_android.py --ndk "$ANDROID_HOME/ndk/27.3.13750724"
       - name: Package only approved outputs
