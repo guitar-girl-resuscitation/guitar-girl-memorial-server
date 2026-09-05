@@ -1,0 +1,15 @@
+[package]
+name = "ggfm-android-ffi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ggfm-domain = { path = "../domain" }
+ggfm-persistence-sqlite = { path = "../persistence-sqlite" }
+ggfm-policy-memorial = { path = "../policy-memorial" }
+ggfm-transport-http = { path = "../transport-http" }
+tokio.workspace = true

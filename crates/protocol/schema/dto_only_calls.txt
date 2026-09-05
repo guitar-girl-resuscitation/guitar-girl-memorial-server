@@ -1,0 +1,13 @@
+buyUserTitle
+checkBuyProduct
+checkUser
+deleteUser
+endPlayMusic
+getNoticeList
+getPurchaseDiamondLog
+getTourList
+getTourRank
+getUserInfo
+getUserItemInven
+logCashComplete
+playCheck

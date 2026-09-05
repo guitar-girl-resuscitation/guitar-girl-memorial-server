@@ -1,0 +1,70 @@
+name: Build and release
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: server-release-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: false
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_TERM_COLOR: always
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Audit exact source and history
+        run: python tools/release_guard.py --history
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+          rustup target add aarch64-linux-android
+      - name: Test
+        run: cargo test --workspace --locked -j2
+      - name: Build desktop server
+        run: cargo build --locked --release -j2 -p ggfm-server
+      - name: Android NDK
+        run: sdkmanager "ndk;27.3.13750724"
+      - name: Build Android server
+        run: python tools/build_android.py --ndk "$ANDROID_HOME/ndk/27.3.13750724"
+      - name: Package only approved outputs
+        run: |
+          python tools/release_artifacts.py pack --kind server-linux-x64 --file ggfm-server=target/release/ggfm-server --file ggfm_server.h=include/ggfm_server.h --file memorial-policy.json=policy/memorial-policy.json --file THIRD_PARTY_TERMINAL_FONT.md=THIRD_PARTY_TERMINAL_FONT.md
+          python tools/release_artifacts.py pack --kind server-android-arm64 --file libggfm_server.so=target/aarch64-linux-android/release/libggfm_android_ffi.so --file ggfm_server.h=include/ggfm_server.h --file memorial-policy.json=policy/memorial-policy.json --file THIRD_PARTY_TERMINAL_FONT.md=THIRD_PARTY_TERMINAL_FONT.md
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-release
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: server-release
+          path: dist
+      - name: Verify then publish exact-source release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'nightly' }}
+        run: python tools/release_artifacts.py publish --tag "$RELEASE_TAG"

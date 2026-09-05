@@ -1,0 +1,213 @@
+{
+  "version": 1,
+  "followerGiftIcons": {
+    "1": "icon_gift_gingerman",
+    "2": "icon_gift_chocomilk",
+    "3": "icon_gift_sandwich",
+    "4": "icon_gift_bread",
+    "5": "icon_gift_grapefruit",
+    "6": "icon_gift_coffee"
+  },
+  "legacyItems": [
+    {"kind":"costume","area":1,"id":9},
+    {"kind":"costume","area":1,"id":10},
+    {"kind":"costume","area":1,"id":12},
+    {"kind":"costume","area":1,"id":13},
+    {"kind":"costume","area":1,"id":20},
+    {"kind":"costume","area":1,"id":29},
+    {"kind":"costume","area":1,"id":30},
+    {"kind":"costume","area":1,"id":31},
+    {"kind":"costume","area":2,"id":203},
+    {"kind":"costume","area":2,"id":208},
+    {"kind":"costume","area":2,"id":209},
+    {"kind":"costume","area":2,"id":227},
+    {"kind":"costume","area":2,"id":228},
+    {"kind":"guitar","area":1,"id":6},
+    {"kind":"guitar","area":1,"id":8},
+    {"kind":"guitar","area":1,"id":10},
+    {"kind":"guitar","area":1,"id":35},
+    {"kind":"guitar","area":1,"id":36},
+    {"kind":"guitar","area":1,"id":37},
+    {"kind":"guitar","area":1,"id":38},
+    {"kind":"guitar","area":2,"id":208},
+    {"kind":"guitar","area":2,"id":214},
+    {"kind":"guitar","area":2,"id":241},
+    {"kind":"guitar","area":2,"id":242},
+    {"kind":"guitar","area":2,"id":243},
+    {"kind":"guitar","area":2,"id":244},
+    {"kind":"music","area":1,"id":12},
+    {"kind":"music","area":1,"id":13},
+    {"kind":"music","area":2,"id":211}
+  ],
+  "progressionMultiplier": 0.1,
+  "scaledAchievementIds": [3, 4, 203, 204],
+  "preserveSkillUnlockRequirements": true,
+  "cosmeticPrice": 10,
+  "skillCooldownMultiplier": 0.1,
+  "skillResetSeconds": 300,
+  "encoreBaseSeconds": 3600.0,
+  "maxSingleStageEnergyCost": 5,
+  "ch3EnergyCap": 200,
+  "ch3EnergyRestoreSeconds": 1,
+  "ch3RewardMultiplier": 10,
+  "ch3ProfileExpPerClear": 450,
+  "passPointMultiplier": 10,
+  "requirements": {
+    "multiplier": 0.1,
+    "rounding": "ceil-min-1",
+    "preserveFirstFanLevel": true,
+    "affectionMultiplier": 1.0,
+    "preserveAllAffectionThresholdsIncludingLily": true,
+    "achievementFanRequirements": true
+  },
+  "acquisition": {
+    "ch1LikesMultiplier": 1.0,
+    "ch2LikesMultiplier": 1.0,
+    "ch2NotesMultiplier": 1.0
+  },
+  "upgradeCosts": {
+    "singleDigitCurrencies": ["CP", "Candy"],
+    "progressionCurrencyCosts": "official-times-progressionMultiplier",
+    "preserveCurveDigits": true,
+    "freeRemainsFree": true,
+    "positivePriceMapping": "distinct-price-rank-to-1-through-10",
+    "skillAndFurnitureCurve": "base-1-to-relative-cap-client-float32-truncate-skill-target-offset-2-unit-offset-1",
+    "formulaCapMin": 10,
+    "formulaCapMax": 20,
+    "formulaCapGrouping": "table-area-currency-original-final-price-linear-half-up",
+    "furnitureTableCurve": "PropLevel-per-prop-level-linear-float32-truncate-relative-original-final-cap",
+    "preserveCurrencyType": true
+  },
+  "cosmetics": {
+    "purchasablePrice": 10,
+    "progressionCurrencyPrice": "official-times-progressionMultiplier",
+    "preserveCurrencyType": true,
+    "ch1NonDefaultOutfitBonusPercent": 30,
+    "ch1NonDefaultGuitarBonusPercent": 20,
+    "ch2NonDefaultBonus": "maximum-of-original-category",
+    "preserveOriginalSourceForCh3PassAndEvents": true
+  },
+  "cooldowns": {
+    "skillMultiplier": 0.1,
+    "skillResetSeconds": 300,
+    "encoreBaseSeconds": 3600,
+    "encoreLevelScaling": "preserve-original-relative-ratio"
+  },
+  "chapterThree": {
+    "maximumSingleStageCost": 5,
+    "maximumSingleStageCostSource": "audited-client-8.0.0-constant",
+    "energyCap": 200,
+    "energyRestoreSecondsPerPoint": 1,
+    "scoreArithmetic": "client-arm64-float32",
+    "settlementStar": "current-run",
+    "mapStar": "historical-maximum"
+  },
+  "starPass": {
+    "seasonCount": 13,
+    "rotation": "device-local-calendar-day",
+    "manualSelectionResetsSlotAnchor": true,
+    "premiumEnabled": true,
+    "claimsSeparatedByLane": true
+  },
+  "timers": {
+    "storage": "absolute-unix-seconds",
+    "serviceRestartDoesNotAdvanceCalendarState": true
+  },
+  "memorialShop": {
+    "shopCategory": 4,
+    "productType": 4,
+    "sellType": 0,
+    "sellValue": 0,
+    "areaList": "ALL",
+    "items": [
+      {
+        "id": 50001,
+        "productIdIos": "ios_choco_525",
+        "productIdAndroid": "and_choco_525",
+        "resourceName": "icon_shop_09",
+        "rewardGroup": 95001,
+        "sortIndex": 10,
+        "title": {"ko":"초콜릿 525개","en":"525 Chocolate","ja":"チョコ525個","zhChs":"525个巧克力","zhCht":"525個巧克力"},
+        "description": {"ko":"초콜릿 525개 받기","en":"Receive 525 Chocolate","ja":"チョコ525個取得","zhChs":"领取525个巧克力","zhCht":"領取525個巧克力"},
+        "rewards": [{"type":1,"id":1,"quantity":525}]
+      },
+      {
+        "id": 50002,
+        "productIdIos": "ios_choco_2200",
+        "productIdAndroid": "and_choco_2200",
+        "resourceName": "icon_shop_10",
+        "rewardGroup": 95002,
+        "sortIndex": 20,
+        "title": {"ko":"초콜릿 2,200개","en":"2200 Chocolate","ja":"チョコ2200個","zhChs":"2200个巧克力","zhCht":"2200個巧克力"},
+        "description": {"ko":"초콜릿 2,200개 받기","en":"Receive 2200 Chocolate","ja":"チョコ2200個取得","zhChs":"领取2200个巧克力","zhCht":"領取2200個巧克力"},
+        "rewards": [{"type":1,"id":1,"quantity":2200}]
+      },
+      {
+        "id": 50003,
+        "productIdIos": "ios_choco_5750",
+        "productIdAndroid": "and_choco_5750",
+        "resourceName": "icon_shop_11",
+        "rewardGroup": 95003,
+        "sortIndex": 30,
+        "title": {"ko":"초콜릿 5,750개","en":"5750 Chocolate","ja":"チョコ5750個","zhChs":"5750个巧克力","zhCht":"5750個巧克力"},
+        "description": {"ko":"초콜릿 5,750개 받기","en":"Receive 5750 Chocolate","ja":"チョコ5750個取得","zhChs":"领取5750个巧克力","zhCht":"領取5750個巧克力"},
+        "rewards": [{"type":1,"id":1,"quantity":5750}]
+      },
+      {
+        "id": 50004,
+        "productIdIos": "ios_choco_12000",
+        "productIdAndroid": "and_choco_12000",
+        "resourceName": "icon_shop_12",
+        "rewardGroup": 95004,
+        "sortIndex": 40,
+        "title": {"ko":"초콜릿 12,000개","en":"12000 Chocolate","ja":"チョコ12000個","zhChs":"12000个巧克力","zhCht":"12000個巧克力"},
+        "description": {"ko":"초콜릿 12,000개 받기","en":"Receive 12000 Chocolate","ja":"チョコ12000個取得","zhChs":"领取12000个巧克力","zhCht":"領取12000個巧克力"},
+        "rewards": [{"type":1,"id":1,"quantity":12000}]
+      },
+      {
+        "id": 50005,
+        "productIdIos": "ios_beginner_pack",
+        "productIdAndroid": "and_beginner_pack",
+        "resourceName": "icon_shop_06",
+        "rewardGroup": 95005,
+        "sortIndex": 50,
+        "title": {"ko":"초보자 패키지","en":"Beginner Pack","ja":"初心者パック","zhChs":"新手礼包","zhCht":"新手禮包"},
+        "description": {"ko":"초보자를 위한 특별 패키지","en":"A special pack for new players","ja":"初心者向けの特別パック","zhChs":"为新玩家准备的特别礼包","zhCht":"為新玩家準備的特別禮包"},
+        "rewards": [{"type":1,"id":1,"quantity":2200},{"type":1,"id":2,"quantity":100000}]
+      },
+      {
+        "id": 50006,
+        "productIdIos": "ios_master_pack",
+        "productIdAndroid": "and_master_pack",
+        "resourceName": "icon_shop_07",
+        "rewardGroup": 95006,
+        "sortIndex": 60,
+        "title": {"ko":"마스터 패키지","en":"Master Pack","ja":"マスターパック","zhChs":"大师礼包","zhCht":"大師禮包"},
+        "description": {"ko":"성장을 위한 특별 패키지","en":"A special pack for rapid growth","ja":"成長のための特別パック","zhChs":"快速成长特别礼包","zhCht":"快速成長特別禮包"},
+        "rewards": [{"type":1,"id":1,"quantity":12000},{"type":1,"id":2,"quantity":1000000},{"type":6,"id":4,"quantity":1}]
+      },
+      {
+        "id": 50007,
+        "productIdIos": "ios_guitar_girl_premium",
+        "productIdAndroid": "and_guitar_girl_premium",
+        "resourceName": "icon_shop_30",
+        "rewardGroup": 95007,
+        "sortIndex": 70,
+        "title": {"ko":"기타 소녀 프리미엄","en":"Guitar Girl Premium","ja":"ギター少女プレミアム","zhChs":"吉他少女高级版","zhCht":"吉他少女高級版"},
+        "description": {"ko":"프리미엄 기능 잠금 해제","en":"Unlock premium features","ja":"プレミアム機能を解放","zhChs":"解锁高级功能","zhCht":"解鎖高級功能"},
+        "rewards": [{"type":6,"id":4,"quantity":1}]
+      },
+      {
+        "id": 50008,
+        "productIdIos": "ios_continuous_tap",
+        "productIdAndroid": "and_continuous_tap",
+        "resourceName": "icon_shop_05",
+        "rewardGroup": 95008,
+        "sortIndex": 80,
+        "title": {"ko":"연속 탭","en":"Continuous Tap","ja":"連続タップ","zhChs":"连续点击","zhCht":"連續點擊"},
+        "description": {"ko":"연속 탭 기능 잠금 해제","en":"Unlock continuous tapping","ja":"連続タップ機能を解放","zhChs":"解锁连续点击功能","zhCht":"解鎖連續點擊功能"},
+        "rewards": [{"type":6,"id":5,"quantity":1}]
+      }
+    ]
+  }
+}

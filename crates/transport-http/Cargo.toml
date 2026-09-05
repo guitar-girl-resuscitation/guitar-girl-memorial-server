@@ -1,0 +1,24 @@
+[package]
+name = "ggfm-transport-http"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+axum.workspace = true
+form_urlencoded.workspace = true
+ggfm-domain = { path = "../domain" }
+ggfm-master-data = { path = "../master-data" }
+ggfm-persistence-sqlite = { path = "../persistence-sqlite" }
+ggfm-policy-memorial = { path = "../policy-memorial" }
+ggfm-protocol = { path = "../protocol" }
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(ggfm_private_oracle)'] }

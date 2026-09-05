@@ -1,0 +1,91 @@
+{
+  "schema": 1,
+  "calls": {
+    "buyPackage": {
+      "class": "active"
+    },
+    "completeLog": {
+      "class": "active"
+    },
+    "getPostTime": {
+      "request_candidates": [
+        "post_model::GetPostTimeDataInfo"
+      ],
+      "response_candidates": [
+        "post_model::GetPostTimeRetDataInfo"
+      ],
+      "request_wires": [
+        {
+          "namespace": "post_model",
+          "wire_type": "GetPostTimeDataInfo"
+        }
+      ],
+      "response_wires": [
+        {
+          "namespace": "post_model",
+          "wire_type": "GetPostTimeRetDataInfo"
+        }
+      ],
+      "has_server_time": true
+    },
+    "setFollowerQuestInfinite": {
+      "class": "active"
+    },
+    "setTutorial": {
+      "class": "active"
+    },
+    "setUserGP": {
+      "class": "active"
+    },
+    "updateNickName": {
+      "class": "active"
+    },
+    "updateUserTitle": {
+      "class": "active"
+    }
+  },
+  "types": {
+    "main_model::GetSubscribeList": [
+      {
+        "name": "I_id",
+        "type": "int64",
+        "id": 1
+      },
+      {
+        "name": "I_Area",
+        "type": "int16",
+        "id": 2
+      },
+      {
+        "name": "S_Type",
+        "type": "string",
+        "id": 3
+      },
+      {
+        "name": "I_TimeLimit",
+        "type": "int16",
+        "id": 4
+      },
+      {
+        "name": "B_IsActive",
+        "type": "int16",
+        "id": 7
+      },
+      {
+        "name": "I_StartYear",
+        "type": "int32",
+        "id": 11
+      },
+      {
+        "name": "I_RepeatMonth",
+        "type": "int32",
+        "id": 12
+      },
+      {
+        "name": "I_MonthGroupIndex",
+        "type": "int32",
+        "id": 13
+      }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+# Startup terminal glyph attribution
+
+The small ANSI Shadow glyph subset in `crates/android-ffi/src/terminal_banner.rs`
+was rendered from `ansi_shadow.flf`, distributed with pyfiglet 1.0.4. The font
+header credits an unknown original author, the historical Roy/SAC TheDraw font
+collection, and patorjk's FIGFont editor. No game font or game artwork is used.
+The runtime renderer is Rust; pyfiglet itself is not shipped in the application.
+
+PyFiglet: An implementation of figlet written in Python
+
+The MIT License (MIT)
+
+Copyright © 2007-2018
+Christopher Jones <cjones@insub.org>
+Stefano Rivera <stefano@rivera.za.net>
+Peter Waller <p@pwaller.net>
+And various contributors (see git history).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the “Software”), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

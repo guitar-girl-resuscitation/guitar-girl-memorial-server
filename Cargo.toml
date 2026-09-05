@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/android-ffi",
+    "crates/contract-tests",
+    "crates/domain",
+    "crates/master-data",
+    "crates/persistence-sqlite",
+    "crates/policy-memorial",
+    "crates/protocol",
+    "crates/server-cli",
+    "crates/transport-http",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+rust-version = "1.85"
+
+[workspace.dependencies]
+axum = "0.8"
+base64 = "0.22"
+bzip2 = "0.6"
+form_urlencoded = "1"
+getrandom = "0.3"
+hex = "0.4"
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.dev]
+debug = 1
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

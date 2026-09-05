@@ -1,0 +1,13 @@
+[package]
+name = "ggfm-policy-memorial"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ggfm-domain = { path = "../domain" }
+serde.workspace = true
+serde_json.workspace = true
+
+[build-dependencies]
+sha2.workspace = true
