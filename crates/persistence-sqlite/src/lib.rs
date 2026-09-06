@@ -73,6 +73,7 @@ pub struct RpcMutation {
 pub struct Database {
     connection: Connection,
     reward_rules: std::sync::Arc<ggfm_domain::RewardRules>,
+    achievement_ids: std::sync::Arc<[i64]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -126,7 +127,31 @@ impl Database {
                 expected: DATABASE_SCHEMA_VERSION,
             });
         }
-        Ok(Self { connection, reward_rules: std::sync::Arc::default() })
+        Ok(Self { connection, reward_rules: std::sync::Arc::default(), achievement_ids: std::sync::Arc::default() })
+    }
+
+    /// Reconcile the active master catalog with every existing slot before login.
+    /// Missing records start unclaimed at zero; existing progress and claims are
+    /// never replaced. Re-running after an upgrade or import is idempotent.
+    pub fn configure_achievement_catalog(&mut self, mut ids: Vec<i64>, now: i64) -> Result<usize, StoreError> {
+        if ids.iter().any(|id| *id <= 0) {
+            return Err(StoreError::Integrity("invalid achievement catalog ID".into()));
+        }
+        ids.sort_unstable();
+        ids.dedup();
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut inserted = 0;
+        for id in &ids {
+            inserted += tx.execute(
+                "INSERT INTO achievement_progress(usn,achievement_id,quantity,quantity_text,updated_at) \
+                 SELECT usn,?1,0,'0',?2 FROM save_slots WHERE true \
+                 ON CONFLICT(usn,achievement_id) DO NOTHING",
+                params![id, now],
+            )?;
+        }
+        tx.commit()?;
+        self.achievement_ids = ids.into();
+        Ok(inserted)
     }
 
     pub fn configure_reward_rules(&mut self, rules: ggfm_domain::RewardRules) -> Result<(), StoreError> {
@@ -173,7 +198,7 @@ impl Database {
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let identity = Self::create_slot_in_transaction(&tx, display_name, now)?;
+        let identity = Self::create_slot_in_transaction(&tx, display_name, now, &self.achievement_ids)?;
         tx.commit()?;
         Ok(identity)
     }
@@ -184,8 +209,9 @@ impl Database {
         display_name: &str,
     ) -> Result<UserIdentity, StoreError> {
         let display_name = display_name.to_owned();
+        let achievement_ids = self.achievement_ids.clone();
         self.commit_rpc_mutation(mutation, |tx| {
-            Self::create_slot_in_transaction(tx, &display_name, mutation.committed_at)
+            Self::create_slot_in_transaction(tx, &display_name, mutation.committed_at, &achievement_ids)
         })
     }
 
@@ -193,6 +219,7 @@ impl Database {
         tx: &rusqlite::Transaction<'_>,
         display_name: &str,
         now: i64,
+        achievement_ids: &[i64],
     ) -> Result<UserIdentity, StoreError> {
         let usn: i64 =
             tx.query_row("SELECT COALESCE(MAX(usn),0)+1 FROM save_slots", [], |row| {
@@ -262,7 +289,7 @@ impl Database {
                 params![usn, kind.key()],
             )?;
         }
-        for achievement_id in 1..=10 {
+        for achievement_id in achievement_ids {
             tx.execute(
                 concat!(
                     "INSERT INTO achievement_progress(",
@@ -3813,8 +3840,46 @@ mod tests {
 
     include!("activity_restart_tests.rs");
 
+    #[test]
+    fn achievement_catalog_repairs_old_slots_without_resetting_progress_or_claims() {
+        let path = std::env::temp_dir().join(format!("ggfm-achievement-catalog-{}.sqlite", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));
+        let mut db = Database::open(&path).unwrap();
+        db.configure_achievement_catalog(vec![1, 3], 100).unwrap();
+        let first = db.create_slot("First", 100).unwrap();
+        let second = db.create_slot("Second", 101).unwrap();
+        db.begin_login(b"catalog-first", DeviceClock::new(101, 0).unwrap()).unwrap();
+        db.request_switch(second.usn).unwrap();
+        db.begin_login(b"catalog-second", DeviceClock::new(102, 0).unwrap()).unwrap();
+        db.connection.execute("UPDATE achievement_progress SET quantity=99,quantity_text='99',updated_at=102 WHERE usn=?1 AND achievement_id=3", [first.usn]).unwrap();
+        db.connection.execute("INSERT INTO achievement_claims(usn,achievement_id,level,claimed_at) VALUES(?1,3,1,102)", [first.usn]).unwrap();
+        drop(db);
+        let mut db = Database::open(&path).unwrap();
+        let ids = vec![1, 3, 201, 202, 203, 204, 205, 206, 207];
+        assert_eq!(db.configure_achievement_catalog(ids.clone(), 200).unwrap(), 14);
+        assert_eq!(db.configure_achievement_catalog(ids.clone(), 201).unwrap(), 0);
+        let snapshot = db.player_snapshot(first.usn).unwrap();
+        assert_eq!(snapshot.achievements.iter().map(|row| row.id).collect::<Vec<_>>(), ids);
+        let kept = snapshot.achievements.iter().find(|row| row.id == 3).unwrap();
+        assert_eq!((kept.quantity, kept.quantity_text.as_str(), kept.level), (99.0, "99", 2));
+        let other = db.player_snapshot(second.usn).unwrap();
+        assert!(other.achievements.iter().all(|row| row.quantity == 0.0 && row.level == 1));
+        assert!(snapshot.achievements.iter().filter(|row| row.id >= 201).all(|row| row.quantity_text == "0" && row.level == 1));
+        assert_eq!(db.connection.query_row("SELECT updated_at FROM achievement_progress WHERE usn=?1 AND achievement_id=3", [first.usn], |r| r.get::<_, i64>(0)).unwrap(), 102);
+        let third = db.create_slot("Third", 202).unwrap();
+        db.request_switch(third.usn).unwrap();
+        db.begin_login(b"catalog-third", DeviceClock::new(202, 0).unwrap()).unwrap();
+        assert_eq!(db.player_snapshot(third.usn).unwrap().achievements.len(), ids.len());
+        drop(db);
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(db.configure_achievement_catalog(ids, 203).unwrap(), 0);
+        assert_eq!(db.player_snapshot(first.usn).unwrap().achievements.iter().find(|row| row.id == 3).unwrap().level, 2);
+        drop(db);
+        std::fs::remove_file(path).unwrap();
+    }
+
     fn setup() -> (Database, UserIdentity) {
         let mut db = Database::open_memory().unwrap();
+        db.configure_achievement_catalog((1..=10).collect(), 100).unwrap();
         db.configure_reward_rules(ggfm_domain::RewardRules {
             costume_fan_bonuses: [(1, (1, 0.0)), (201, (2, 0.0))].into_iter().collect(),
         }).unwrap();

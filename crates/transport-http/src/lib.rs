@@ -314,6 +314,11 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, String> {
     database.execute(move |db| db.configure_reward_rules(reward_rules)).await.map_err(|error| error.to_string())?;
     startup_progress(&config, "[INFO] rewards: shared costume bonus catalog ready; original fan reward bonuses retained");
     let initial_time = config.clock.unix_seconds;
+    let achievement_ids: Vec<i64> = master.achievements.iter().filter(|row| row.active).map(|row| row.id).collect();
+    let achievement_count = achievement_ids.len();
+    let inserted = database.execute(move |db| db.configure_achievement_catalog(achievement_ids, initial_time))
+        .await.map_err(|error| error.to_string())?;
+    startup_progress(&config, &format!("[INFO] achievements: catalog={achievement_count} missing_records_added={inserted}; existing progress and claims preserved"));
     database
         .execute(move |database| database.ensure_default_slot(initial_time))
         .await
