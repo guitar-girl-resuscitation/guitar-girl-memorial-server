@@ -204,7 +204,7 @@ impl Database {
             concat!(
                 "INSERT INTO user_core(",
                 "usn,nickname,fan_level,avatar_id,title_id,last_save_time,device_uuid",
-                ") VALUES(?1,'Guitar Girl',1,1,1,?2,'reborn-local-device')"
+                ") VALUES(?1,'Guitar Girl',1,1,1,?2,'')"
             ),
             params![usn, now],
         )?;
@@ -1170,7 +1170,10 @@ impl Database {
             let (experience, profile_level): (i64, i32) = tx.query_row(
                 "SELECT experience,level FROM affection WHERE usn=?1 AND follower_id=?2",
                 params![mutation.identity.usn,profile_id], |row| Ok((row.get(0)?,row.get(1)?)),
-            )?;
+            ).optional()?.unwrap_or((0, 1));
+            // A profile without earned affection is implicitly level 1 in the
+            // client and tested Rust baseline. The handler validates the master
+            // profile/reward first; missing progress must not become a SQL error.
             let profile = FollowerProfileSnapshot { profile_id, level: profile_level, experience, add_candy: 0 };
             let mut outcomes = Vec::new();
             for (level, rewards) in requested {
@@ -1999,14 +2002,29 @@ impl Database {
         &mut self,
         mutation: &RpcMutation,
         patch: &UserSavePatch,
-        _device_uuid: &str,
+        device_uuid: &str,
         pass_point_multiplier: i64,
         pass_thresholds: &[(i64, i32, i64)],
     ) -> Result<String, StoreError> {
         let pass_thresholds = pass_thresholds.to_vec();
         self.commit_rpc_mutation(mutation, |tx| {
+            // This is the client's device marker, not its save-slot identity.
+            // Returning a synthetic marker causes the stock login handler to
+            // invalidate local tables and erase both hibernation clocks.
+            if !device_uuid.is_empty() && device_uuid.len() <= 256 {
+                tx.execute("UPDATE user_core SET device_uuid=?1 WHERE usn=?2",
+                    params![device_uuid, mutation.identity.usn])?;
+            }
+            for area in &patch.areas {
+                if (1..=2).contains(&area.area) && parse_gp_balance(area.gp1.as_deref())?.is_some() {
+                    tx.execute("INSERT OR IGNORE INTO one_time_flags(usn,flag,value,updated_at) VALUES(?1,?2,'1',?3)",
+                        params![mutation.identity.usn, format!("protocol.gp1.area{}", area.area), mutation.committed_at])?;
+                }
+            }
+            let gp1_ch1: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM one_time_flags WHERE usn=?1 AND flag='protocol.gp1.area1')",
+                [mutation.identity.usn], |row| row.get(0))?;
             if let Some(core) = &patch.core {
-                if let Some(value) = core.ch1_like.filter(|value| value.is_finite() && *value >= 0.0)
+                if let Some(value) = core.ch1_like.filter(|value| !gp1_ch1 && value.is_finite() && *value >= 0.0)
                 {
                     tx.execute(
                         "UPDATE currencies SET amount=?1 WHERE usn=?2 AND kind='ch1_like'",
@@ -2070,13 +2088,27 @@ impl Database {
                 // client's content dictionaries. Ownership comes only from
                 // the explicit user-content lists or a business transaction.
                 let like_kind = if area.area == 2 { "ch2_like" } else { "ch1_like" };
-                if let Some(value) = area.like_amount.filter(|value| value.is_finite() && *value >= 0.0)
+                // v8 serializes the live BigInteger balances in S_Gp1/S_Gp2.
+                // D_Like is a legacy field and may remain zero during play.
+                let uses_gp1: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM one_time_flags WHERE usn=?1 AND flag=?2)",
+                    params![mutation.identity.usn, format!("protocol.gp1.area{}", area.area)], |row| row.get(0))?;
+                let live_like = parse_gp_balance(area.gp1.as_deref())?
+                    .or(area.like_amount.filter(|value| !uses_gp1 && value.is_finite() && *value >= 0.0));
+                if let Some(value) = live_like
                 {
                     tx.execute(
                         "UPDATE currencies SET amount=?1 WHERE usn=?2 AND kind=?3",
                         params![value, mutation.identity.usn, like_kind],
                     )?;
                 }
+                if area.area == 2
+                    && let Some(value) = parse_gp_balance(area.gp2.as_deref())?
+                {
+                    tx.execute("UPDATE currencies SET amount=?1 WHERE usn=?2 AND kind='ch2_note'",
+                        params![value, mutation.identity.usn])?;
+                }
+                // CH1 GP2 is candy, owned by reward/purchase transactions.
+                // It has the same stale-snapshot restriction as D_Candy.
                 if let Some(value) = area.fans.filter(|value| *value >= 0) {
                     tx.execute(
                         "UPDATE currencies SET amount=MAX(amount,?1) WHERE usn=?2 AND kind='fans'",
@@ -2242,10 +2274,13 @@ impl Database {
                     concat!(
                         "INSERT INTO messenger_rooms(usn,room_id,state,last_confirm_index,unlock_group_list,update_time_ticks,updated_at) ",
                         "VALUES(?1,?2,0,?3,?4,?5,?6) ON CONFLICT(usn,room_id) DO UPDATE SET ",
-                        "last_confirm_index=MAX(messenger_rooms.last_confirm_index,excluded.last_confirm_index),",
-                        "unlock_group_list=CASE WHEN excluded.update_time_ticks>=messenger_rooms.update_time_ticks ",
-                        "THEN excluded.unlock_group_list ELSE messenger_rooms.unlock_group_list END,",
-                        "update_time_ticks=MAX(messenger_rooms.update_time_ticks,excluded.update_time_ticks),updated_at=?6"
+                        // The index belongs to the CURRENT group, not the lifetime
+                        // of the room. Stock DoNextProgress starts a new group at -1.
+                        // Keep this tuple atomic; request sequence validation above
+                        // handles stale writes, even when device time moves back.
+                        "last_confirm_index=excluded.last_confirm_index,",
+                        "unlock_group_list=excluded.unlock_group_list,",
+                        "update_time_ticks=excluded.update_time_ticks,updated_at=?6"
                     ),
                     params![
                         mutation.identity.usn,
@@ -3422,6 +3457,16 @@ fn update_ch3_profile(
     })
 }
 
+fn parse_gp_balance(value: Option<&str>) -> Result<Option<f64>, StoreError> {
+    let Some(value) = value.filter(|value| !value.is_empty()) else { return Ok(None); };
+    if value.len() > 309 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(DomainError::InvalidAmount.into());
+    }
+    let amount = value.parse::<f64>().map_err(|_| DomainError::InvalidAmount)?;
+    if !amount.is_finite() { return Err(DomainError::InvalidAmount.into()); }
+    Ok(Some(amount))
+}
+
 fn update_follower_profile(
     tx: &rusqlite::Transaction<'_>,
     usn: Usn,
@@ -3778,6 +3823,25 @@ mod tests {
     }
 
     #[test]
+    fn new_slot_has_zero_currency_even_when_another_slot_has_progress() {
+        let (mut db, old) = setup();
+        db.begin_login(b"old", DeviceClock::new(100, 0).unwrap()).unwrap();
+        db.grant_currency(old.usn, CurrencyKind::Ch1Like, 12.0, "old-slot", 101)
+            .unwrap();
+        db.grant_currency(old.usn, CurrencyKind::Candy, 500.0, "old-slot", 101)
+            .unwrap();
+        let new = db.create_slot("Fresh", 102).unwrap();
+        db.request_switch(new.usn).unwrap();
+        db.begin_login(b"fresh", DeviceClock::new(103, 0).unwrap()).unwrap();
+        let snapshot = db.player_snapshot(new.usn).unwrap();
+        for currency in CurrencyKind::ALL {
+            assert_eq!(snapshot.currency(currency), 0.0);
+        }
+        assert!(snapshot.ch3.stages.iter().all(|stage| !stage.completed));
+        assert_eq!(db.player_snapshot(old.usn).unwrap().currency(CurrencyKind::Ch1Like), 12.0);
+    }
+
+    #[test]
     fn fresh_slot_keeps_ch2_locked_with_ch2_catalog_defaults() {
         let (mut db, identity) = setup();
         db.begin_login(b"fresh-area", DeviceClock::new(101, 0).unwrap())
@@ -3802,6 +3866,131 @@ mod tests {
             assert_eq!(level.level, 1);
             assert_eq!(level.reward_level, 0);
         }
+    }
+
+    #[test]
+    fn v8_gp_balances_override_legacy_zero_and_preserve_real_spending() {
+        let (mut db, identity) = setup();
+        let session = db.begin_login(b"v8-gp", DeviceClock::new(101, 0).unwrap()).unwrap();
+        db.grant_currency(identity.usn, CurrencyKind::Candy, 110.0, "seed", 101).unwrap();
+        for (seq, likes, notes) in [(1, "257432", "600"), (3, "250000", "590"), (5, "0", "0")] {
+            let mutation = RpcMutation { nonce: session.nonce, identity: identity.clone(), request_seq: seq,
+                rpc: "userSave".into(), idempotency_key: format!("v8-gp:{seq}"), committed_at: 102 + seq };
+            let patch = UserSavePatch {
+                core: Some(ggfm_domain::CoreSavePatch { ch1_like: Some(0.0), ..Default::default() }),
+                areas: (1..=2).map(|area| ggfm_domain::AreaSavePatch {
+                    area, like_amount: Some(0.0), gp1: Some(likes.into()),
+                    gp2: Some(notes.into()), ..Default::default()
+                }).collect(), ..Default::default()
+            };
+            db.merge_user_save(&mutation, &patch, "test", 10, &[]).unwrap();
+            let snapshot = db.player_snapshot(identity.usn).unwrap();
+            assert_eq!(snapshot.currency(CurrencyKind::Ch1Like), likes.parse::<f64>().unwrap());
+            assert_eq!(snapshot.currency(CurrencyKind::Ch2Like), likes.parse::<f64>().unwrap());
+            assert_eq!(snapshot.currency(CurrencyKind::Ch2Note), notes.parse::<f64>().unwrap());
+            assert_eq!(snapshot.currency(CurrencyKind::Candy), 110.0);
+            assert_eq!(snapshot.device_uuid, "test");
+            let partial = UserSavePatch {
+                core: Some(ggfm_domain::CoreSavePatch { ch1_like: Some(0.0), ..Default::default() }),
+                areas: vec![ggfm_domain::AreaSavePatch { area: 2, like_amount: Some(0.0), ..Default::default() }],
+                ..Default::default()
+            };
+            let partial_mutation = RpcMutation { request_seq: seq + 1,
+                idempotency_key: format!("v8-partial:{seq}"), ..mutation.clone() };
+            db.merge_user_save(&partial_mutation, &partial, "", 10, &[]).unwrap();
+            let snapshot = db.player_snapshot(identity.usn).unwrap();
+            assert_eq!(snapshot.currency(CurrencyKind::Ch1Like), likes.parse::<f64>().unwrap());
+            assert_eq!(snapshot.currency(CurrencyKind::Ch2Like), likes.parse::<f64>().unwrap());
+            assert_eq!(snapshot.currency(CurrencyKind::Ch2Note), notes.parse::<f64>().unwrap());
+            assert_eq!(snapshot.device_uuid, "test");
+        }
+        for invalid in ["-1", "NaN", "inf", "1A", "1e5", "1.5"] {
+            assert!(parse_gp_balance(Some(invalid)).is_err());
+        }
+        assert_eq!(parse_gp_balance(Some("")).unwrap(), None);
+        assert_eq!(parse_gp_balance(Some("00042")).unwrap(), Some(42.0));
+    }
+
+    #[test]
+    fn messenger_group_transition_keeps_index_and_group_together() {
+        let (mut db, identity) = setup();
+        let other = db.create_slot("other", 101).unwrap();
+        let session = db.begin_login(b"messenger-groups", DeviceClock::new(102, 0).unwrap()).unwrap();
+        for (seq, index, groups, ticks) in [(1, 20, "group-a", 500), (2, -1, "group-a,group-b", 400), (3, 0, "group-a,group-b", 401)] {
+            let mutation = RpcMutation { nonce: session.nonce, identity: identity.clone(), request_seq: seq,
+                rpc: "userSave".into(), idempotency_key: format!("messenger:{seq}"), committed_at: 102 + seq };
+            let expected = MessengerSnapshot { room_id: 7, last_confirm_index: index,
+                unlock_group_list: groups.into(), update_time_ticks: ticks };
+            let patch = UserSavePatch { messengers: vec![ggfm_domain::MessengerSavePatch {
+                room_id: expected.room_id, last_confirm_index: index,
+                unlock_group_list: groups.into(), update_time_ticks: ticks,
+            }], ..Default::default() };
+            db.merge_user_save(&mutation, &patch, "device", 10, &[]).unwrap();
+            assert_eq!(db.player_snapshot(identity.usn).unwrap().messengers, vec![expected]);
+            let other_rooms: i64 = db.connection.query_row(
+                "SELECT COUNT(*) FROM messenger_rooms WHERE usn=?1", [other.usn], |row| row.get(0)).unwrap();
+            assert_eq!(other_rooms, 0);
+        }
+        let before = db.player_snapshot(identity.usn).unwrap().messengers;
+        let stale = RpcMutation { nonce: session.nonce, identity: identity.clone(), request_seq: 2,
+            rpc: "userSave".into(), idempotency_key: "messenger:late-old-group".into(), committed_at: 200 };
+        let old_group = UserSavePatch { messengers: vec![ggfm_domain::MessengerSavePatch {
+            room_id: 7, last_confirm_index: 20, unlock_group_list: "group-a".into(), update_time_ticks: 999,
+        }], ..Default::default() };
+        assert!(matches!(db.merge_user_save(&stale, &old_group, "device", 10, &[]),
+            Err(StoreError::Domain(DomainError::StaleRequest))));
+        assert_eq!(db.player_snapshot(identity.usn).unwrap().messengers, before);
+    }
+
+    #[test]
+    fn ch3_progression_requires_each_previous_stage_and_failure_does_not_unlock() {
+        let (mut db, identity) = setup();
+        let session = db.begin_login(b"ch3-sequential", DeviceClock::new(101, 0).unwrap()).unwrap();
+        let stage = |index, story| Ch3StageDefinition {
+            stage_id: 1000 + i64::from(index), chapter: 1, stage_index: index, story,
+        };
+        let mutation = |seq| RpcMutation {
+            nonce: session.nonce, identity: identity.clone(), request_seq: seq,
+            rpc: "chThirdStage".into(), idempotency_key: format!("ch3-sequential:{seq}"),
+            committed_at: 102 + seq,
+        };
+        let initial = db.player_snapshot(identity.usn).unwrap().ch3;
+        assert_eq!(initial.stages.len(), 1);
+        assert_eq!(initial.stages[0].stage_id, 1001);
+        assert!(!initial.stages[0].completed);
+        assert!(matches!(db.settle_ch3_stage(&mutation(1), stage(2, false), Some(stage(3, false)), 3, 500, 0, 200, vec![], 0, vec![]), Err(StoreError::Domain(DomainError::Locked))));
+        db.settle_ch3_stage(&mutation(2), stage(1, true), Some(stage(2, false)), 0, 0, 0, 200, vec![], 0, vec![]).unwrap();
+        db.settle_ch3_stage(&mutation(3), stage(2, false), Some(stage(3, false)), 0, 0, 0, 200, vec![], 0, vec![]).unwrap();
+        assert!(matches!(db.settle_ch3_stage(&mutation(4), stage(3, false), None, 3, 500, 0, 200, vec![], 0, vec![]), Err(StoreError::Domain(DomainError::Locked))));
+        db.settle_ch3_stage(&mutation(5), stage(2, false), Some(stage(3, false)), 1, 100, 0, 200, vec![], 0, vec![]).unwrap();
+        let saved = db.player_snapshot(identity.usn).unwrap().ch3;
+        assert_eq!(saved.stages.iter().filter(|row| row.completed).map(|row| row.stage_id).collect::<Vec<_>>(), vec![1001, 1002]);
+        db.settle_ch3_stage(&mutation(6), stage(3, false), None, 1, 100, 0, 200, vec![], 0, vec![]).unwrap();
+    }
+
+    #[test]
+    fn uninitialized_affection_can_claim_only_initial_reward_once() {
+        let (mut db, identity) = setup();
+        let session = db.begin_login(b"profile-default", DeviceClock::new(101, 0).unwrap()).unwrap();
+        let mut mutation = RpcMutation {
+            nonce: session.nonce,
+            identity: identity.clone(),
+            request_seq: 1,
+            rpc: "setUserFollowerProfileReward".into(),
+            idempotency_key: "profile-default:1".into(),
+            committed_at: 102,
+        };
+        let outcomes = db.claim_follower_profile_rewards(&mutation, 1, vec![(1, vec![])]).unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].profile.level, 1);
+        mutation.request_seq = 2;
+        mutation.idempotency_key = "profile-default:2".into();
+        assert!(db.claim_follower_profile_rewards(&mutation, 1, vec![(1, vec![])]).unwrap().is_empty());
+        mutation.request_seq = 3;
+        mutation.idempotency_key = "profile-default:3".into();
+        assert!(db.claim_follower_profile_rewards(&mutation, 1, vec![(2, vec![])]).is_err());
+        let snapshot = db.player_snapshot(identity.usn).unwrap();
+        assert_eq!(snapshot.affection_claims.len(), 1);
     }
 
     #[test]

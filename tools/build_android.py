@@ -17,7 +17,7 @@ if not cc.is_file() or not ar.is_file():
     raise SystemExit("NDK compiler missing")
 env = dict(os.environ)
 env.update(CC_aarch64_linux_android=str(cc), AR_aarch64_linux_android=str(ar),
-           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=str(cc), CARGO_BUILD_JOBS="2")
-subprocess.run(["cargo", "build", "--locked", "--release", "-j2", "-p",
+           CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=str(cc), CARGO_BUILD_JOBS="1")
+subprocess.run(["cargo", "build", "--locked", "--release", "-j1", "-p",
                 "ggfm-android-ffi", "--target", "aarch64-linux-android"],
                cwd=root, env=env, check=True)

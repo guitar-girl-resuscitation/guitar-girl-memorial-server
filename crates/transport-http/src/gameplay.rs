@@ -164,7 +164,9 @@ pub async fn execute(
             // Star Pass rotation). A non-zero generation also invalidates the
             // stock cache after a policy/schema revision without forcing a
             // multi-megabyte master refresh on every launch.
-            const MASTER_OVERLAY_GENERATION: i64 = 9;
+            // Generation 10 publishes effective memorial pass fill amounts;
+            // existing installations must discard the previous stock labels.
+            const MASTER_OVERLAY_GENERATION: i64 = 10;
             let local_midnight_utc = clock.local_epoch_day().saturating_mul(86_400)
                 - i64::from(clock.utc_offset_minutes) * 60;
             let usn = session.identity.usn;
@@ -722,10 +724,16 @@ pub async fn execute(
         }
         "userLogin" => {
             let usn = session.identity.usn;
-            let snapshot = state
+            let mut snapshot = state
                 .database
                 .execute(move |database| database.player_snapshot(usn))
                 .await?;
+            // The embedded endpoint belongs to this device. Echo its audited
+            // login marker even for older saves with the former placeholder;
+            // the next committed userSave persists it. USN remains unchanged.
+            if let Some(device) = request.string("Device_uuid").filter(|s| !s.is_empty() && s.len() <= 256) {
+                snapshot.device_uuid = device.to_owned();
+            }
             Some(player_response(spec, &snapshot, clock)?)
         }
         "userLoad" => {
@@ -1881,6 +1889,10 @@ pub async fn execute(
         "userSave" => {
             let patch = parse_user_save(state, request);
             let core_fans = patch.core.as_ref().and_then(|core| core.fans);
+            let core_like = patch.core.as_ref().and_then(|core| core.ch1_like);
+            let area_likes = patch.areas.iter()
+                .map(|area| format!("{}:{:?}", area.area, area.like_amount))
+                .collect::<Vec<_>>().join(",");
             let area_fans = patch
                 .areas
                 .iter()
@@ -1888,7 +1900,7 @@ pub async fn execute(
                 .collect::<Vec<_>>()
                 .join(",");
             crate::runtime_log(&format!(
-                "userSave parsed: usn={} core_fans={core_fans:?} area_fans=[{area_fans}] areas={} content={} achievements={} missions={} music={} skills={}",
+                "userSave parsed: usn={} core_like={core_like:?} area_likes=[{area_likes}] core_fans={core_fans:?} area_fans=[{area_fans}] areas={} content={} achievements={} missions={} music={} skills={}",
                 session.identity.usn,
                 patch.areas.len(),
                 patch.content.len(),
@@ -1977,11 +1989,7 @@ pub async fn execute(
                         "User_ch_third_stage".into(),
                         Value::List {
                             element_type: STRUCT,
-                            values: snapshot
-                                .stages
-                                .iter()
-                                .map(ch3_stage_wire_value)
-                                .collect::<Result<_, _>>()?,
+                            values: ch3_completed_stage_values(&snapshot.stages)?,
                         },
                     ),
                     (
@@ -2573,7 +2581,7 @@ fn baseline_compatibility_string(field: &str, session: &LoginSession) -> String 
         "u_last_login" => "2026-09-03 00:00:00".to_owned(),
         "u_country" | "country" | "country_code" | "u_state" => "US".to_owned(),
         "buy_datetime" | "reg_datetime" | "update_datetime" => "2099-12-31 23:59:59".to_owned(),
-        "device_uuid" => "reborn-local-device".to_owned(),
+        "device_uuid" => String::new(),
         "transfer_id" => format!("reborn-{}", session.identity.usn),
         "mode" | "sub_mode" | "s_type" => "normal".to_owned(),
         value if value.contains("title") || value.contains("name") => "Reborn".to_owned(),
@@ -3393,6 +3401,15 @@ fn main_game_info_wire_value(
     )
 }
 
+fn ch3_completed_stage_values(
+    stages: &[ggfm_domain::Ch3StageSnapshot],
+) -> Result<Vec<Value>, ProtocolEnvelopeError> {
+    // GetIsAvailableStart checks the preceding row; GetIsClearStage treats
+    // story-row presence as completion even when I_Star is zero.
+    // Keep unlocked-but-unplayed rows internal to SQLite.
+    stages.iter().filter(|stage| stage.completed).map(ch3_stage_wire_value).collect()
+}
+
 fn ch3_stage_wire_value(
     stage: &ggfm_domain::Ch3StageSnapshot,
 ) -> Result<Value, ProtocolEnvelopeError> {
@@ -3607,7 +3624,12 @@ fn player_response_projected(
             } else {
                 ggfm_domain::CurrencyKind::Ch1Like
             };
-            let gp_text = (area.gp != 0.0).then(|| area.gp.to_string());
+            let gp1 = format!("{:.0}", snapshot.currency(like_kind));
+            let gp2 = format!("{:.0}", snapshot.currency(if area.area == 2 {
+                ggfm_domain::CurrencyKind::Ch2Note
+            } else {
+                ggfm_domain::CurrencyKind::Candy
+            }));
             let value = struct_value(
                 schema,
                 "user_model",
@@ -3636,7 +3658,8 @@ fn player_response_projected(
                         "I_SelectedGuitarId".into(),
                         Value::I64(area.current_guitar.unwrap_or(1)),
                     ),
-                    ("S_Gp1".into(), text(gp_text.as_deref().unwrap_or(""))),
+                    ("S_Gp1".into(), text(&gp1)),
+                    ("S_Gp2".into(), text(&gp2)),
                 ],
             )?;
             Ok((Value::I32(area.area), value))
@@ -4012,24 +4035,7 @@ fn response_contents(
             ],
         )).collect::<Result<_, _>>()?,
     }));
-    let ch3_stages = snapshot
-        .ch3
-        .stages
-        .iter()
-        .map(|stage| {
-            struct_value(
-                schema,
-                "user_model",
-                "UserChThirdStage",
-                [
-                    ("I_id".into(), Value::I32(to_i32(stage.stage_id))),
-                    ("I_ChapterId".into(), Value::I32(stage.chapter)),
-                    ("I_StageIndex".into(), Value::I32(stage.stage_index)),
-                    ("I_Star".into(), Value::I32(stage.best_star)),
-                ],
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+    let ch3_stages = ch3_completed_stage_values(&snapshot.ch3.stages)?;
     overrides.push((
         "User_chthird_stage".to_owned(),
         Value::List {
@@ -4995,6 +5001,15 @@ fn transform_master_value(
         return value;
     }
     match (table, field) {
+        // getGameDataList replaces the bundled client catalog at login. Publish
+        // effective fill amounts here too, without mutating the original master
+        // used by paidEventPoint (which applies the multiplier exactly once).
+        ("SubscribePass", "paidpoint" | "adpoint") => match source {
+            MasterScalar::Integer(points) => {
+                MasterScalar::Integer(points.saturating_mul(policy.pass_point_multiplier))
+            }
+            _ => source.clone(),
+        },
         ("Followergiftitem", "resourcename") => policy.follower_gift_icons.get(&id)
             .map(|name| MasterScalar::Text(name.clone()))
             .unwrap_or_else(|| source.clone()),
@@ -5435,6 +5450,35 @@ mod tests {
     }
 
     #[test]
+    fn user_load_projects_v8_balances_from_authoritative_currencies() {
+        use ggfm_domain::CurrencyKind;
+        let mut database = Database::open_memory().unwrap();
+        let identity = database.ensure_default_slot(1_788_360_000).unwrap();
+        database.begin_login(b"v8-balance-projection", DeviceClock::new(1_788_360_000, 0).unwrap()).unwrap();
+        let mut snapshot = database.player_snapshot(identity.usn).unwrap();
+        snapshot.currencies = vec![
+            (CurrencyKind::Ch1Like, 257432.0),
+            (CurrencyKind::Ch2Like, 800.0),
+            (CurrencyKind::Ch2Note, 590.0),
+            (CurrencyKind::Candy, 110.0),
+        ];
+        let schema = ProtocolSchema::embedded();
+        let spec = schema.call("userLoad").unwrap();
+        let Value::Struct(fields) = player_response_projected(
+            spec, &snapshot, true, DeviceClock::new(1_788_360_000, 0).unwrap(),
+        ).unwrap() else { panic!() };
+        let Value::Map { entries, .. } = &fields.iter().find(|field| field.id == 2).unwrap().value else { panic!() };
+        let descriptor = schema.type_spec("user_model::UserAreaData").unwrap();
+        for (area, gp1, gp2) in [(1, "257432", "110"), (2, "800", "590")] {
+            let Value::Struct(fields) = &entries.iter().find(|(key, _)| *key == Value::I32(area)).unwrap().1 else { panic!() };
+            for (name, expected) in [("S_Gp1", gp1), ("S_Gp2", gp2)] {
+                let id = descriptor.fields.iter().find(|field| field.name == name).unwrap().id;
+                assert_eq!(fields.iter().find(|field| field.id == id).unwrap().value, text(expected));
+            }
+        }
+    }
+
+    #[test]
     fn buff_user_load_matches_the_captured_narrow_projection() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -5673,6 +5717,21 @@ mod tests {
         assert_eq!(follower.kind, ContentKind::Follower);
         assert_eq!(follower.currency, CurrencyKind::Ch1Like);
         assert_eq!(follower.price, 90.0);
+
+        let pass = BTreeMap::from([
+            ("id".into(), MasterScalar::Integer(7)),
+            ("paidpoint".into(), MasterScalar::Integer(5_000)),
+            ("adpoint".into(), MasterScalar::Integer(2_000)),
+            ("pointprice".into(), MasterScalar::Integer(50)),
+        ]);
+        let overlay = PassMasterOverlay { active_season: 7, local_month: 9 };
+        for (field, expected) in [("paidpoint", 50_000), ("adpoint", 20_000), ("pointprice", 50)] {
+            assert_eq!(
+                transform_master_value(&state, "SubscribePass", field, &pass, &pass[field], overlay),
+                MasterScalar::Integer(expected),
+            );
+        }
+        assert_eq!(pass["paidpoint"], MasterScalar::Integer(5_000));
 
         drop(state);
         std::fs::remove_file(path).unwrap();

@@ -213,15 +213,19 @@ pub unsafe extern "C" fn ggfm_server_start(
         return -1;
     }
     let Ok(data_dir_text) = unsafe { CStr::from_ptr(data_dir_utf8) }.to_str() else {
+        boot_log("[ERROR] arguments: data directory is not UTF-8 (code=-2)");
         return -2;
     };
     let Ok(capability) = unsafe { CStr::from_ptr(capability_utf8) }.to_str() else {
+        boot_log("[ERROR] arguments: capability encoding invalid (code=-2; value omitted)");
         return -2;
     };
     if capability.len() != 64 || !capability.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        boot_log("[ERROR] arguments: capability format invalid (code=-2; value omitted)");
         return -2;
     }
     let Ok(clock) = DeviceClock::new(device_unix_seconds, utc_offset_minutes) else {
+        boot_log(format!("[ERROR] clock: unix={device_unix_seconds} offset_minutes={utc_offset_minutes} invalid (code=-3)"));
         return -3;
     };
     let mut guard = state().lock().unwrap();
@@ -256,11 +260,17 @@ pub unsafe extern "C" fn ggfm_server_start(
             let capability = capability.clone();
             move || {
                 boot_log("runtime.tokio.start");
-                let runtime = tokio::runtime::Builder::new_multi_thread()
+                let runtime = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .enable_all()
-                    .build()
-                    .expect("embedded runtime");
+                    .build() {
+                        Ok(runtime) => runtime,
+                        Err(error) => {
+                            boot_log(format!("[ERROR] runtime.tokio.create: {error:?}"));
+                            let _ = ready_tx.send(Err(error.to_string()));
+                            return;
+                        }
+                    };
                 runtime.block_on(async move {
                     match ggfm_transport_http::start(ggfm_transport_http::ServerConfig {
                         database_path: data_dir.join("ggfm.sqlite3"),
@@ -306,13 +316,22 @@ pub unsafe extern "C" fn ggfm_server_start(
                 });
             }
         });
-    let Ok(thread) = thread else {
-        boot_log("fatal.server_thread");
-        return -5;
+    let thread = match thread {
+        Ok(thread) => thread,
+        Err(error) => {
+            boot_log(format!("[ERROR] runtime.thread.spawn: {error:?} (code=-5)"));
+            return -5;
+        }
     };
     let endpoint = match ready_rx.recv() {
         Ok(Ok(endpoint)) => endpoint,
-        Ok(Err(_)) | Err(_) => {
+        Ok(Err(error)) => {
+            boot_log(format!("[ERROR] startup.ready: {error} (code=-6)"));
+            let _ = thread.join();
+            return -6;
+        }
+        Err(error) => {
+            boot_log(format!("[ERROR] startup.ready.channel: {error:?} (code=-6)"));
             let _ = thread.join();
             return -6;
         }

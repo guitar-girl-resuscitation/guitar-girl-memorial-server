@@ -277,6 +277,16 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, String> {
         .and_then(|master| master.load_catalog())
         .map_err(|error| {
             startup_progress(&config, &format!("[ERROR] master: catalog loading failed: {error}"));
+            // Preserve SQLite's extended error code and filesystem evidence.
+            // Do not delete or recreate player saves to mask catalog failures.
+            startup_progress(&config, &format!("[ERROR] master: detail={error:?}"));
+            match fs::metadata(&config.master_data_path) {
+                Ok(metadata) => startup_progress(&config, &format!(
+                    "[INFO] master: file={} bytes={} readonly={}",
+                    metadata.is_file(), metadata.len(), metadata.permissions().readonly())),
+                Err(io_error) => startup_progress(&config, &format!(
+                    "[ERROR] master: stat failed: {io_error:?}")),
+            }
             error.to_string()
         })?;
     startup_progress(&config, &format!("[INFO] master: loaded schema={} source_tables={} costumes={} guitars={} music={} skills={}",
