@@ -24,9 +24,26 @@ use crate::AppState;
 
 const GAME_DATA_RESPONSE_KEY: &str = "ret";
 
+// Generation 11 invalidates rows cached before Patch preserved fractional
+// Skill/Unit increments. A constructor-only fix cannot repair serialized rows
+// that bypass the constructor on a same-day application upgrade.
+const MASTER_OVERLAY_GENERATION: i64 = 11;
+
+fn master_update_time(clock: DeviceClock, slot_revision: i64) -> i64 {
+    let local_midnight_utc = clock.local_epoch_day().saturating_mul(86_400)
+        - i64::from(clock.utc_offset_minutes) * 60;
+    local_midnight_utc
+        .saturating_add(MASTER_OVERLAY_GENERATION)
+        .saturating_add(slot_revision)
+}
+
 #[cfg(test)]
 #[path = "master_projection_tests.rs"]
 mod master_projection_tests;
+
+#[cfg(test)]
+#[path = "master_cache_tests.rs"]
+mod master_cache_tests;
 
 #[derive(Debug, thiserror::Error)]
 pub enum GameplayError {
@@ -164,26 +181,20 @@ pub async fn execute(
             // Star Pass rotation). A non-zero generation also invalidates the
             // stock cache after a policy/schema revision without forcing a
             // multi-megabyte master refresh on every launch.
-            // Generation 10 publishes effective memorial pass fill amounts;
-            // existing installations must discard the previous stock labels.
-            const MASTER_OVERLAY_GENERATION: i64 = 10;
-            let local_midnight_utc = clock.local_epoch_day().saturating_mul(86_400)
-                - i64::from(clock.utc_offset_minutes) * 60;
             let usn = session.identity.usn;
             let slot_revision = state
                 .database
                 .execute(move |database| database.state_revision(usn, "master-data"))
                 .await?;
+            let update_time = master_update_time(clock, slot_revision);
+            tracing::debug!(usn, generation = MASTER_OVERLAY_GENERATION, slot_revision,
+                update_time, "master: advertise client table cache revision");
             Some(response_sparse_struct(
                 spec,
                 schema,
                 [(
                     "Upd_time".into(),
-                    Value::I64(
-                        local_midnight_utc
-                            .saturating_add(MASTER_OVERLAY_GENERATION)
-                            .saturating_add(slot_revision),
-                    ),
+                    Value::I64(update_time),
                 )],
             )?)
         }
