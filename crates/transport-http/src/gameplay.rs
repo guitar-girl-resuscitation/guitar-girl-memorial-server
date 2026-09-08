@@ -5443,7 +5443,7 @@ mod tests {
         let identity = db.ensure_default_slot(1_788_360_000).unwrap();
         db.begin_login(b"pass-regression", DeviceClock::new(1_788_360_000, 0).unwrap()).unwrap();
         let mut snapshot = db.player_snapshot(identity.usn).unwrap();
-        for offset in [-720, 0, 600, 840] {
+        for offset in [-720, -360, -300, -210, 0, 330, 345, 600, 840] {
             let start = DeviceClock::new(1_788_360_000, offset).unwrap();
             snapshot.pass.anchor.anchor_day = start.local_epoch_day();
             snapshot.pass.anchor.anchor_season = 1;

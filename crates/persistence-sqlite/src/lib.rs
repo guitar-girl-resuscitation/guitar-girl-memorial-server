@@ -2363,10 +2363,9 @@ impl Database {
                 )?;
             }
             if !patch.follower_quests.is_empty() {
-                // The tested Rust baseline deliberately ignores the counters and CurrentID in
-                // asynchronous userSave snapshots. setUserFollowerQuest owns this ledger; the
-                // client can otherwise relabel a completed stage as the next stage and make it
-                // immediately claimable.
+                // Local task actions are persisted through userSave BEFORE claiming.
+                // Accept monotonic counters only for the authoritative current stage.
+                // A snapshot cannot select a stage, reset claims, or advance the chain.
                 let current_id = tx
                     .query_row(
                         "SELECT MAX(stage_id) FROM follower_quests WHERE usn=?1 AND chain_id=1",
@@ -2390,6 +2389,21 @@ impl Database {
                         ),
                         params![mutation.identity.usn, current_id, condition],
                     )?;
+                }
+                let completed: bool = tx.query_row(
+                    "SELECT completed FROM follower_quests WHERE usn=?1 AND chain_id=1 AND stage_id=?2",
+                    params![mutation.identity.usn, current_id], |row| row.get(0),
+                )?;
+                if !completed {
+                    for saved in patch.follower_quests.iter().filter(|saved| saved.current_id == current_id) {
+                        for (index, quantity) in saved.condition_values.iter().enumerate() {
+                            if !quantity.is_finite() || *quantity < 0.0 { continue; }
+                            tx.execute(
+                                "UPDATE quest_conditions SET quantity=MAX(quantity,?1) WHERE usn=?2 AND chain_id=1 AND stage_id=?3 AND condition_id=?4 AND claimed=0",
+                                params![quantity, mutation.identity.usn, current_id, index as i64 + 1],
+                            )?;
+                        }
+                    }
                 }
             }
             tx.execute(
@@ -3839,6 +3853,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     include!("activity_restart_tests.rs");
+    include!("guide_save_restart_tests.rs");
+    include!("timezone_regression_tests.rs");
 
     #[test]
     fn achievement_catalog_repairs_old_slots_without_resetting_progress_or_claims() {
