@@ -32,6 +32,16 @@ primary and its WAL/SHM sidecars under a `.corrupt.<time>` suffix and tries the
 two consistent snapshots. It never treats a copied live main file without its
 WAL as a backup.
 
+GP balances are canonical decimal TEXT backed by `GpAmount`, scoped by USN.
+Schema 4 upgrades in one SQLite transaction; only the three GP currency rows
+move to `gp_balances`. Other player state and identity remain unchanged. Imports
+upgrade a private copy before replacing the destination. Positive-infinite
+legacy GP balances are estimated as 10^318 once, with a per-USN/currency repair
+entry in the mutation ledger in the same transaction. Finite balances are not
+adjusted. Unsupported schemas and other invalid legacy balances do not trigger
+automatic backup rollback. Exact input length is bounded before parsing to
+limit resource use.
+
 ## Device time
 
 The patch supplies Unix seconds and the device UTC offset at each launch and whenever Android reports a time-zone change. Calendar functions derive the local epoch day from that snapshot. Persisted anchors store a local day, so the process may stop for weeks and deterministically compute elapsed days on the next launch.

@@ -1,4 +1,5 @@
 mod actor;
+mod gp;
 pub mod transfer;
 
 use std::{collections::BTreeMap, path::Path};
@@ -24,7 +25,7 @@ pub use actor::DatabaseActor;
 
 const MIGRATION_1: &str = include_str!("../migrations/0001_initial.sql");
 const USER_ID_BASE: i64 = 1_788_360_000_000;
-const DATABASE_SCHEMA_VERSION: i64 = 4;
+const DATABASE_SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, thiserror::Error)]
 pub enum StoreError {
@@ -52,8 +53,10 @@ pub enum StoreError {
     ActiveSlot(Usn),
     #[error("database integrity check failed: {0}")]
     Integrity(String),
+    #[error("legacy balance cannot be recovered ({0}); original save preserved, no automatic rollback to an older backup")]
+    UnrecoverableBalance(String),
     #[error(
-        "save database schema {actual} is unsupported (expected {expected}); this development build intentionally does not migrate test saves"
+        "save database schema {actual} is unsupported (expected {expected}, or migratable version 4); original save was not reset"
     )]
     UnsupportedSchema { actual: i64, expected: i64 },
     #[error("reward type {0} is not supported by the memorial inventory")]
@@ -107,7 +110,7 @@ impl Database {
         Self::configure(Connection::open_in_memory()?)
     }
 
-    fn configure(connection: Connection) -> Result<Self, StoreError> {
+    fn configure(mut connection: Connection) -> Result<Self, StoreError> {
         connection.pragma_update(None, "foreign_keys", true)?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
@@ -120,13 +123,14 @@ impl Database {
             connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))?;
         if version == 0 {
             connection.execute_batch(MIGRATION_1)?;
-            connection.pragma_update(None, "user_version", DATABASE_SCHEMA_VERSION)?;
-        } else if version != DATABASE_SCHEMA_VERSION {
+            connection.pragma_update(None, "user_version", 4)?;
+        } else if version != 4 && version != DATABASE_SCHEMA_VERSION {
             return Err(StoreError::UnsupportedSchema {
                 actual: version,
                 expected: DATABASE_SCHEMA_VERSION,
             });
         }
+        if version == 0 || version == 4 { gp::migrate_v4(&mut connection)?; }
         Ok(Self { connection, reward_rules: std::sync::Arc::default(), achievement_ids: std::sync::Arc::default() })
     }
 
@@ -285,7 +289,8 @@ impl Database {
         }
         for kind in CurrencyKind::ALL {
             tx.execute(
-                "INSERT INTO currencies(usn,kind,amount) VALUES(?1,?2,0)",
+                if kind.is_gp() { "INSERT INTO gp_balances(usn,kind,amount) VALUES(?1,?2,'0')" }
+                else { "INSERT INTO currencies(usn,kind,amount) VALUES(?1,?2,0)" },
                 params![usn, kind.key()],
             )?;
         }
@@ -694,11 +699,19 @@ impl Database {
     }
 
     pub fn currency(&self, usn: Usn, kind: CurrencyKind) -> Result<f64, StoreError> {
+        if kind.is_gp() {
+            return gp::read(&self.connection, usn, kind)?.finite_double()
+                .ok_or_else(|| DomainError::AmountTooLarge.into());
+        }
         Ok(self.connection.query_row(
             "SELECT amount FROM currencies WHERE usn=?1 AND kind=?2",
             params![usn, kind.key()],
             |row| row.get(0),
         )?)
+    }
+
+    pub fn gp_balance(&self, usn: Usn, kind: CurrencyKind) -> Result<ggfm_domain::GpAmount, StoreError> {
+        gp::read(&self.connection, usn, kind)
     }
 
     pub fn ad_level(&self, usn: Usn, group_id: i64) -> Result<AdLevelSnapshot, StoreError> {
@@ -1003,6 +1016,9 @@ impl Database {
             samseck_step: self.sam_seck_step(usn)?,
             device_uuid,
             currencies,
+            gp_balances: [CurrencyKind::Ch1Like, CurrencyKind::Ch2Like, CurrencyKind::Ch2Note]
+                .into_iter().map(|kind| Ok((kind, gp::read(&self.connection, usn, kind)?)))
+                .collect::<Result<_, StoreError>>()?,
             areas,
             owned_content,
             content_levels,
@@ -1397,7 +1413,7 @@ impl Database {
             if apply_reward_grant(tx, rules,usn,&reward,mutation.committed_at,"daily-reward")?{applied.push(reward);}
             let choco=tx.query_row("SELECT amount FROM currencies WHERE usn=?1 AND kind='chocolate'",[usn],|row|row.get(0))?;
             let candy=tx.query_row("SELECT amount FROM currencies WHERE usn=?1 AND kind='candy'",[usn],|row|row.get(0))?;
-            let likes=tx.query_row("SELECT amount FROM currencies WHERE usn=?1 AND kind='ch1_like'",[usn],|row|row.get(0))?;
+            let likes=gp::read(tx,usn,CurrencyKind::Ch1Like)?.legacy_wire_double();
             let fans=tx.query_row("SELECT amount FROM currencies WHERE usn=?1 AND kind='fans'",[usn],|row|row.get(0))?;
             let result=(applied,choco,candy,likes,fans);
             Ok((result.clone(),Some((Vec::new(),choco,candy,likes,fans))))
@@ -2053,10 +2069,7 @@ impl Database {
             if let Some(core) = &patch.core {
                 if let Some(value) = core.ch1_like.filter(|value| !gp1_ch1 && value.is_finite() && *value >= 0.0)
                 {
-                    tx.execute(
-                        "UPDATE currencies SET amount=?1 WHERE usn=?2 AND kind='ch1_like'",
-                        params![value, mutation.identity.usn],
-                    )?;
+                    gp::set(tx, mutation.identity.usn, CurrencyKind::Ch1Like, &ggfm_domain::GpAmount::from_legacy(value)?)?;
                 }
                 if let Some(value) = core.fans.filter(|value| *value >= 0) {
                     tx.execute(
@@ -2120,19 +2133,17 @@ impl Database {
                 let uses_gp1: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM one_time_flags WHERE usn=?1 AND flag=?2)",
                     params![mutation.identity.usn, format!("protocol.gp1.area{}", area.area)], |row| row.get(0))?;
                 let live_like = parse_gp_balance(area.gp1.as_deref())?
-                    .or(area.like_amount.filter(|value| !uses_gp1 && value.is_finite() && *value >= 0.0));
+                    .or(area.like_amount.filter(|value| !uses_gp1 && value.is_finite() && *value >= 0.0)
+                        .map(ggfm_domain::GpAmount::from_legacy).transpose()?);
                 if let Some(value) = live_like
                 {
-                    tx.execute(
-                        "UPDATE currencies SET amount=?1 WHERE usn=?2 AND kind=?3",
-                        params![value, mutation.identity.usn, like_kind],
-                    )?;
+                    gp::set(tx, mutation.identity.usn,
+                        if like_kind == "ch2_like" { CurrencyKind::Ch2Like } else { CurrencyKind::Ch1Like }, &value)?;
                 }
                 if area.area == 2
                     && let Some(value) = parse_gp_balance(area.gp2.as_deref())?
                 {
-                    tx.execute("UPDATE currencies SET amount=?1 WHERE usn=?2 AND kind='ch2_note'",
-                        params![value, mutation.identity.usn])?;
+                    gp::set(tx, mutation.identity.usn, CurrencyKind::Ch2Note, &value)?;
                 }
                 // CH1 GP2 is candy, owned by reward/purchase transactions.
                 // It has the same stale-snapshot restriction as D_Candy.
@@ -2224,6 +2235,35 @@ impl Database {
                 )?;
             }
             for achievement in &patch.achievements {
+                if achievement.id > 0 && achievement.id != 10
+                    && let Some(text) = achievement.quantity_text.as_deref().filter(|s| !s.is_empty())
+                {
+                    let incoming = ggfm_domain::GpAmount::parse(text)?;
+                    let old: Option<(String, f64)> = tx.query_row(
+                        "SELECT quantity_text,quantity FROM achievement_progress WHERE usn=?1 AND achievement_id=?2",
+                        params![mutation.identity.usn,achievement.id], |r| Ok((r.get(0)?,r.get(1)?))).optional()?;
+                    let previous = match old {
+                        Some((text, numeric)) => {
+                            let exact = ggfm_domain::GpAmount::parse(&text);
+                            let legacy = ggfm_domain::GpAmount::from_legacy(numeric);
+                            match (exact, legacy) {
+                                // Old numeric-only saves can retain the default
+                                // text "0". Never reduce their recorded progress.
+                                (Ok(a), Ok(b)) if a == ggfm_domain::GpAmount::default() => b,
+                                (Ok(a), Ok(_)) => a,
+                                (Ok(a), Err(_)) | (Err(_), Ok(a)) => a,
+                                (Err(e), Err(_)) => return Err(e.into()),
+                            }
+                        }
+                        None => ggfm_domain::GpAmount::default(),
+                    };
+                    let maximum = incoming.max(previous);
+                    // Only the legacy comparison projection saturates; the
+                    // authoritative counter and wire S_Quantity remain exact.
+                    tx.execute("INSERT INTO achievement_progress(usn,achievement_id,quantity,quantity_text,updated_at) VALUES(?1,?2,?3,?4,?5) ON CONFLICT(usn,achievement_id) DO UPDATE SET quantity=excluded.quantity,quantity_text=excluded.quantity_text,updated_at=excluded.updated_at",
+                        params![mutation.identity.usn,achievement.id,maximum.finite_double().unwrap_or(f64::MAX),maximum.to_string(),mutation.committed_at])?;
+                    continue;
+                }
                 if achievement.id <= 0 || !achievement.quantity.is_finite() || achievement.quantity < 0.0 {
                     continue;
                 }
@@ -2487,10 +2527,7 @@ impl Database {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let inserted = tx.execute("INSERT OR IGNORE INTO reward_transactions(usn,transaction_id,source,reward_json,created_at) VALUES(?1,?2,'currency',?3,?4)", params![usn,transaction_id,serde_json::to_string(&Reward::Currency { currency: kind, amount }).unwrap(),now])?;
         if inserted != 0 {
-            tx.execute(
-                "UPDATE currencies SET amount=amount+?1 WHERE usn=?2 AND kind=?3",
-                params![amount, usn, kind.key()],
-            )?;
+            gp::credit_currency(&tx, usn, kind, amount)?;
         }
         tx.commit()?;
         Ok(inserted != 0)
@@ -3403,10 +3440,7 @@ fn apply_stored_reward(
         if !amount.is_finite() || amount < 0.0 {
             return Err(DomainError::InvalidAmount.into());
         }
-        tx.execute(
-            "UPDATE currencies SET amount=amount+?1 WHERE usn=?2 AND kind=?3",
-            params![amount, usn, currency.key()],
-        )?;
+        gp::credit_currency(tx, usn, currency, amount)?;
         return Ok(());
     }
     let content = content_from_key(&row.kind)
@@ -3498,14 +3532,9 @@ fn update_ch3_profile(
     })
 }
 
-fn parse_gp_balance(value: Option<&str>) -> Result<Option<f64>, StoreError> {
+fn parse_gp_balance(value: Option<&str>) -> Result<Option<ggfm_domain::GpAmount>, StoreError> {
     let Some(value) = value.filter(|value| !value.is_empty()) else { return Ok(None); };
-    if value.len() > 309 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err(DomainError::InvalidAmount.into());
-    }
-    let amount = value.parse::<f64>().map_err(|_| DomainError::InvalidAmount)?;
-    if !amount.is_finite() { return Err(DomainError::InvalidAmount.into()); }
-    Ok(Some(amount))
+    Ok(Some(ggfm_domain::GpAmount::parse(value)?))
 }
 
 fn update_follower_profile(
@@ -3653,6 +3682,7 @@ fn deduct_currency(
     kind: CurrencyKind,
     amount: f64,
 ) -> Result<(), StoreError> {
+    if kind.is_gp() { return gp::debit(tx, usn, kind, amount); }
     if !amount.is_finite() || amount < 0.0 {
         return Err(DomainError::InvalidAmount.into());
     }
@@ -3730,10 +3760,7 @@ fn apply_reward_grant(
             }
             other => return Err(StoreError::UnsupportedReward(format!("consume:{other}"))),
         };
-        tx.execute(
-            "UPDATE currencies SET amount=amount+?1 WHERE usn=?2 AND kind=?3",
-            params![reward.amount, usn, currency.key()],
-        )?;
+        gp::credit_currency(tx, usn, currency, reward.amount)?;
         return Ok(true);
     }
     if reward.reward_type == 6 && reward.reward_id == 2 {
@@ -3989,7 +4016,7 @@ mod tests {
             assert!(parse_gp_balance(Some(invalid)).is_err());
         }
         assert_eq!(parse_gp_balance(Some("")).unwrap(), None);
-        assert_eq!(parse_gp_balance(Some("00042")).unwrap(), Some(42.0));
+        assert_eq!(parse_gp_balance(Some("00042")).unwrap().unwrap().to_string(), "42");
     }
 
     #[test]
@@ -5177,7 +5204,7 @@ mod tests {
         let restored = Database::open(&backup).unwrap();
         assert_eq!(restored.player_snapshot(identity.usn).unwrap(), before);
         assert_eq!(restored.currency(other.usn, CurrencyKind::Candy).unwrap(), 0.0);
-        assert_eq!(restored.connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 4);
+        assert_eq!(restored.connection.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), DATABASE_SCHEMA_VERSION);
         drop(restored);
         std::fs::remove_file(backup).unwrap();
     }

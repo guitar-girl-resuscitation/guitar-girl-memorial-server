@@ -220,6 +220,9 @@ fn sidecar_path(database: &FsPath, suffix: &str) -> PathBuf {
 fn open_database_with_recovery(path: &FsPath, now: i64) -> Result<DatabaseActor, String> {
     let first_error = match DatabaseActor::open(path.to_owned()) {
         Ok(database) => return Ok(database),
+        Err(error @ (StoreError::UnrecoverableBalance(_) | StoreError::UnsupportedSchema { .. })) => {
+            return Err(error.to_string());
+        }
         Err(error) => error.to_string(),
     };
     if !path.exists() {
@@ -1505,7 +1508,8 @@ fn parse_currency_amount(currency: CurrencyKind, value: &str) -> Result<f64, ()>
         return Err(());
     }
     let result: f64 = value.parse().map_err(|_| ())?;
-    if result.is_finite() && result > 0.0 && (!literal || result <= f64::from(i32::MAX)) {
+    let limit = if literal { f64::from(i32::MAX) } else { 1_000_000.0 };
+    if result.is_finite() && result > 0.0 && result <= limit {
         Ok(result)
     } else {
         Err(())
@@ -1885,7 +1889,7 @@ mod tests {
     fn connection_diagnostics_report_the_actual_sqlite_configuration() {
         let database = Database::open_memory().unwrap();
         assert_eq!(database.connection_diagnostics().unwrap(),
-            "schema=4 journal=memory foreign_keys=1 synchronous=2");
+            "schema=5 journal=memory foreign_keys=1 synchronous=2");
     }
 
     #[tokio::test]

@@ -21,16 +21,29 @@ fn validated(path: &Path) -> Result<Connection, StoreError> {
     let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     db.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
     let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version != DATABASE_SCHEMA_VERSION {
+    if version != 4 && version != DATABASE_SCHEMA_VERSION {
         return Err(StoreError::UnsupportedSchema { actual: version, expected: DATABASE_SCHEMA_VERSION });
     }
-    let expected = Database::open_memory()?;
-    if schema(&db)? != schema(&expected.connection)? {
+    let expected = if version == 4 {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(crate::MIGRATION_1)?;
+        db
+    } else { Database::open_memory()?.connection };
+    if schema(&db)? != schema(&expected)? {
         return Err(StoreError::Integrity("save schema does not match this build".into()));
     }
     let check: String = db.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
     if check != "ok" || db.prepare("PRAGMA foreign_key_check")?.exists([])? {
         return Err(StoreError::Integrity("save integrity or foreign key check failed".into()));
+    }
+    // Validate exact balances before any restore touches the destination.
+    if version == DATABASE_SCHEMA_VERSION {
+        let mut statement = db.prepare("SELECT amount FROM gp_balances")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let amount: String = row.get(0)?;
+            ggfm_domain::GpAmount::parse(&amount)?;
+        }
     }
     Ok(db)
 }
@@ -65,13 +78,58 @@ pub fn import(source: &Path, destination: &Path) -> Result<(), StoreError> {
     if destination.exists() && fs::canonicalize(source)? == fs::canonicalize(destination)? {
         return Err(StoreError::Integrity("source and destination must differ".into()));
     }
+    // Upgrade a private copy first. The user's export stays read-only and an
+    // invalid legacy amount cannot partially overwrite the current save.
+    let mut upgraded = Connection::open_in_memory()?;
+    copy_transaction(&source_db, &mut upgraded)?;
+    upgraded.pragma_update(None, "foreign_keys", true)?;
+    let version: i64 = upgraded.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version == 4 { crate::gp::migrate_v4(&mut upgraded)?; }
     let mut current = Connection::open(destination)?;
-    copy_transaction(&source_db, &mut current)
+    copy_transaction(&upgraded, &mut current)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_import_upgrades_copy_without_modifying_export_or_losing_slots() {
+        let root = std::env::temp_dir().join(format!("ggfm-legacy-transfer-{}-{}", std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir(&root).unwrap();
+        let source = root.join("legacy.sqlite");
+        let current = root.join("current.sqlite");
+        let c = Connection::open(&source).unwrap();
+        c.execute_batch(crate::MIGRATION_1).unwrap();
+        c.pragma_update(None,"user_version",4).unwrap();
+        c.execute_batch("INSERT INTO save_slots VALUES(1,'123','old',1,1); INSERT INTO currencies VALUES(1,'ch1_like',1e308); INSERT INTO currencies VALUES(1,'candy',99);").unwrap();
+        drop(c);
+        import(&source,&current).unwrap();
+        let db=Database::open(&current).unwrap();
+        assert_eq!(db.gp_balance(1,ggfm_domain::CurrencyKind::Ch1Like).unwrap(),ggfm_domain::GpAmount::from_legacy(1e308).unwrap());
+        assert_eq!(db.currency(1,ggfm_domain::CurrencyKind::Candy).unwrap(),99.0);
+        drop(db);
+        let c=Connection::open(&source).unwrap();
+        assert_eq!(c.query_row("PRAGMA user_version",[],|r|r.get::<_,i64>(0)).unwrap(),4);
+        c.execute("UPDATE currencies SET amount=?1 WHERE kind='ch1_like'",[f64::INFINITY]).unwrap();
+        drop(c);
+        import(&source,&current).unwrap();
+        let db=Database::open(&current).unwrap();
+        let repaired=ggfm_domain::GpAmount::parse(&format!("1{}","0".repeat(318))).unwrap();
+        assert_eq!(db.gp_balance(1,ggfm_domain::CurrencyKind::Ch1Like).unwrap(),repaired);
+        drop(db);
+        let c=Connection::open(&source).unwrap();
+        assert_eq!(c.query_row("SELECT amount FROM currencies WHERE kind='ch1_like'",[],|r|r.get::<_,f64>(0)).unwrap(),f64::INFINITY);
+        c.pragma_update(None,"ignore_check_constraints",true).unwrap();
+        c.execute("UPDATE currencies SET amount=-1 WHERE kind='ch1_like'",[]).unwrap();
+        drop(c);
+        assert!(import(&source,&current).is_err());
+        let db=Database::open(&current).unwrap();
+        assert_eq!(db.gp_balance(1,ggfm_domain::CurrencyKind::Ch1Like).unwrap(),repaired);
+        drop(db);
+        for p in [source,current] { fs::remove_file(p).unwrap(); }
+        fs::remove_dir(root).unwrap();
+    }
     #[test]
     fn export_wal_and_restore_all_slots_without_old_save_backup() {
         let root = std::env::temp_dir().join(format!("ggfm-transfer-{}-{}", std::process::id(),

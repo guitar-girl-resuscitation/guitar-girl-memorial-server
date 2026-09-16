@@ -1451,7 +1451,8 @@ pub async fn execute(
             let id = request.integer("Id").unwrap_or(0);
             let level = request.integer("Level").unwrap_or(0) as i32;
             let quantity = request.string("S_quantity")
-                .and_then(|s| s.parse::<f64>().ok())
+                .and_then(|s| ggfm_domain::GpAmount::parse(s).ok())
+                .map(|v| v.finite_double().unwrap_or(f64::MAX))
                 .filter(|v| v.is_finite() && *v >= 0.0)
                 .or_else(|| request.value("Quantity").and_then(|value| value_double(Some(value))))
                 .unwrap_or(0.0);
@@ -3635,12 +3636,10 @@ fn player_response_projected(
             } else {
                 ggfm_domain::CurrencyKind::Ch1Like
             };
-            let gp1 = format!("{:.0}", snapshot.currency(like_kind));
-            let gp2 = format!("{:.0}", snapshot.currency(if area.area == 2 {
-                ggfm_domain::CurrencyKind::Ch2Note
-            } else {
-                ggfm_domain::CurrencyKind::Candy
-            }));
+            let gp1 = snapshot.gp_balance(like_kind).to_string();
+            let gp2 = if area.area == 2 {
+                snapshot.gp_balance(ggfm_domain::CurrencyKind::Ch2Note).to_string()
+            } else { format!("{:.0}", snapshot.currency(ggfm_domain::CurrencyKind::Candy)) };
             let value = struct_value(
                 schema,
                 "user_model",
@@ -5468,10 +5467,12 @@ mod tests {
         database.begin_login(b"v8-balance-projection", DeviceClock::new(1_788_360_000, 0).unwrap()).unwrap();
         let mut snapshot = database.player_snapshot(identity.usn).unwrap();
         snapshot.currencies = vec![
-            (CurrencyKind::Ch1Like, 257432.0),
-            (CurrencyKind::Ch2Like, 800.0),
-            (CurrencyKind::Ch2Note, 590.0),
             (CurrencyKind::Candy, 110.0),
+        ];
+        snapshot.gp_balances = vec![
+            (CurrencyKind::Ch1Like, ggfm_domain::GpAmount::parse("257432").unwrap()),
+            (CurrencyKind::Ch2Like, ggfm_domain::GpAmount::parse("800").unwrap()),
+            (CurrencyKind::Ch2Note, ggfm_domain::GpAmount::parse("590").unwrap()),
         ];
         let schema = ProtocolSchema::embedded();
         let spec = schema.call("userLoad").unwrap();
@@ -5485,6 +5486,25 @@ mod tests {
             for (name, expected) in [("S_Gp1", gp1), ("S_Gp2", gp2)] {
                 let id = descriptor.fields.iter().find(|field| field.name == name).unwrap().id;
                 assert_eq!(fields.iter().find(|field| field.id == id).unwrap().value, text(expected));
+            }
+        }
+        let huge = format!("1{}7", "0".repeat(317));
+        snapshot.gp_balances = [CurrencyKind::Ch1Like,CurrencyKind::Ch2Like,CurrencyKind::Ch2Note]
+            .into_iter().map(|k|(k,ggfm_domain::GpAmount::parse(&huge).unwrap())).collect();
+        let Value::Struct(fields) = player_response_projected(spec,&snapshot,true,DeviceClock::new(1_788_360_000,0).unwrap()).unwrap() else {panic!()};
+        let raw = ggfm_protocol::write_struct(&fields).unwrap();
+        let encoded = ggfm_protocol::encode_transport(&raw).unwrap();
+        let decoded = ggfm_protocol::read_struct(&ggfm_protocol::decode_transport(&encoded).unwrap()).unwrap();
+        let Value::Map{entries,..}=&decoded.iter().find(|f|f.id==2).unwrap().value else {panic!()};
+        for (key,value) in entries {
+            let Value::Struct(fields)=value else {panic!()};
+            for field in &descriptor.fields {
+                if field.name=="S_Gp1" || (field.name=="S_Gp2" && *key==Value::I32(2)) {
+                    assert_eq!(fields.iter().find(|f|f.id==field.id).unwrap().value,text(&huge));
+                }
+                if field.name=="D_Like" {
+                    assert_eq!(fields.iter().find(|f|f.id==field.id).unwrap().value,Value::Double(0.0));
+                }
             }
         }
     }

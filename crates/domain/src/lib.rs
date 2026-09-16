@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 mod consume_reward;
+mod gp_amount;
+pub use gp_amount::{GpAmount, MAX_GP_DIGITS};
 pub use consume_reward::{ConsumeReward, QuantityUnit, RewardRules, fan_reward_count};
 
 pub type Usn = i64;
@@ -55,6 +57,9 @@ pub enum CurrencyKind {
 }
 
 impl CurrencyKind {
+    pub const fn is_gp(self) -> bool {
+        matches!(self, Self::Ch1Like | Self::Ch2Like | Self::Ch2Note)
+    }
     pub const ALL: [Self; 8] = [
         Self::Ch1Like,
         Self::Ch2Like,
@@ -372,6 +377,8 @@ pub struct PlayerSnapshot {
     pub samseck_step: i32,
     pub device_uuid: String,
     pub currencies: Vec<(CurrencyKind, f64)>,
+    #[serde(default)]
+    pub gp_balances: Vec<(CurrencyKind, GpAmount)>,
     pub areas: Vec<AreaSnapshot>,
     pub owned_content: Vec<OwnedContentSnapshot>,
     pub content_levels: Vec<ContentLevelSnapshot>,
@@ -396,7 +403,19 @@ pub struct PlayerSnapshot {
 }
 
 impl PlayerSnapshot {
+    pub fn gp_balance(&self, kind: CurrencyKind) -> GpAmount {
+        self.gp_balances.iter().find(|(k, _)| *k == kind)
+            .map(|(_, v)| v.clone())
+            // Older serialized RPC snapshots predate the exact-balance field.
+            .or_else(|| self.currencies.iter().find(|(k, _)| *k == kind)
+                .and_then(|(_, v)| GpAmount::from_legacy(*v).ok()))
+            .unwrap_or_default()
+    }
+
     pub fn currency(&self, kind: CurrencyKind) -> f64 {
+        if let Some((_, value)) = self.gp_balances.iter().find(|(k, _)| *k == kind) {
+            return value.legacy_wire_double();
+        }
         self.currencies
             .iter()
             .find_map(|(candidate, amount)| (*candidate == kind).then_some(*amount))
@@ -661,6 +680,8 @@ pub enum DomainError {
     InvalidUtcOffset(i32),
     #[error("amount must be finite and non-negative")]
     InvalidAmount,
+    #[error("game-point amount exceeds supported resource limits; balance was not changed")]
+    AmountTooLarge,
     #[error("identity does not belong to this login session")]
     IdentityMismatch,
     #[error("request sequence is stale")]

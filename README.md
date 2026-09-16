@@ -48,7 +48,9 @@ Unity client → Patch → authenticated local HTTP / Thrift
 - SQLite uses WAL, foreign keys and durable writes. Shutdown/recovery safeguards are described in the architecture document.
 - Timers use absolute timestamps. Calendar behavior uses device Unix time and UTC offset, not server uptime. Closing the game does not require a background daemon.
 
-Fresh memorial saves are the supported starting point; do not assume old experimental or official cloud saves can be imported.
+Released memorial schema-4 saves upgrade transactionally to schema 5 on first start; schema-4 exports remain importable. Keep the same application ID and signing key when updating, and do not uninstall or clear app data. USNs, slots, inventory and claim history are retained. Experimental and official cloud saves are not supported, and older server builds cannot read schema 5.
+
+CH1/CH2 likes and CH2 notes use exact decimal integers, not SQLite REAL or `f64`. Inputs and balances are bounded to 4,096 decimal digits; an oversized transaction is rejected without clamping or clearing the balance. Use the matching Patch for scientific display beyond the client's suffix table and bounded memorial multipliers. During schema-4 migration, a positive-infinite GP balance is estimated as 1 DB (10^318), with a per-slot/currency audit record. This is a recovery policy, not reconstruction of the lost value. Finite balances are unchanged; other invalid balances abort the migration without silently restoring an older backup.
 
 ## Memorial rules
 

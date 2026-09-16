@@ -48,14 +48,13 @@ impl DatabaseActor {
                     }
                 }
                 Err(error) => {
-                    let _ = ready_sender.send(Err(error.to_string()));
+                    let _ = ready_sender.send(Err(error));
                 }
             })
             .map_err(|error| StoreError::ActorUnavailable(error.to_string()))?;
         ready_receiver
             .recv()
-            .map_err(|error| StoreError::ActorUnavailable(error.to_string()))?
-            .map_err(StoreError::ActorUnavailable)?;
+            .map_err(|error| StoreError::ActorUnavailable(error.to_string()))??;
         Ok(Self {
             inner: Arc::new(ActorInner {
                 sender: Mutex::new(Some(sender)),
