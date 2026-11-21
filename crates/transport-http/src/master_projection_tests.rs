@@ -10,6 +10,45 @@ use std::{
 };
 
 #[tokio::test]
+#[ignore = "requires GGFM_ORIGINAL_MASTER and GGFM_FIXTURE_COPY (a disposable save copy)"]
+async fn daily_pass_master_and_subscription_match_across_rollover() {
+    let db = DatabaseActor::open(PathBuf::from(std::env::var_os("GGFM_FIXTURE_COPY").unwrap())).unwrap();
+    let usn: i64 = std::env::var("GGFM_FIXTURE_USN").unwrap().parse().unwrap();
+    let snapshot = db.execute(move |db| db.player_snapshot(usn)).await.unwrap();
+    let master_path = PathBuf::from(std::env::var_os("GGFM_ORIGINAL_MASTER").unwrap());
+    let master = MasterData::open_read_only(&master_path).unwrap().load_catalog().unwrap();
+    let state = AppState {
+        database: db, master: Arc::new(master), session: Arc::new(tokio::sync::Mutex::new(None)),
+        capability: Arc::from("fixture"), capability_hash: Arc::from(Vec::<u8>::new()),
+        endpoint: Arc::from("http://127.0.0.1:1"), asset_source: None,
+        startup_notice_emitted: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let anchor = &snapshot.pass.anchor;
+    for elapsed in 0..=13 {
+        let day = anchor.anchor_day + elapsed;
+        let midnight = day * 86400 - i64::from(anchor.utc_offset_minutes) * 60;
+        let clock = DeviceClock::new(midnight + 60, anchor.utc_offset_minutes).unwrap();
+        let expected = (anchor.anchor_season - 1 + elapsed) % 13 + 1;
+        let month = civil_from_days(day).1;
+        let overlay = PassMasterOverlay {
+            active_season: pass_season(clock, anchor.anchor_day, anchor.anchor_season),
+            local_month: month,
+        };
+        let mut active = Vec::new();
+        for row in &state.master.game_data["SubscribeList"] {
+            let Value::Struct(fields) = game_data_row_value(&state, "SubscribeList", "GetSubscribeList", row, overlay).unwrap() else { panic!() };
+            let field = |id| &fields.iter().find(|f| f.id == id).unwrap().value;
+            if field(7) == &Value::I16(1) {
+                assert_eq!(field(12), &Value::I32(month));
+                active.push(field(1).clone());
+            }
+        }
+        assert_eq!(active, vec![Value::I64(expected)]);
+        assert_eq!(active_pass_subscriptions(&snapshot.pass, clock).unwrap(), vec![subscribe_wire_value(expected, midnight).unwrap()]);
+    }
+}
+
+#[tokio::test]
 #[ignore = "requires GGFM_ORIGINAL_MASTER and GGFM_PATCHED_MASTER from a locally verified XAPK"]
 async fn static_master_bundle_matches_server_policy() {
     let original =

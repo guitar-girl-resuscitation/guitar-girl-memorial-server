@@ -1237,6 +1237,7 @@ async fn send_currency_mail(
 struct StarPassView {
     seasons: Vec<i64>,
     active_season: i64,
+    anchor_season: i64,
     anchor_day: i64,
     restart_required_after_selection: bool,
 }
@@ -1268,6 +1269,7 @@ async fn list_star_passes(State(state): State<AppState>, headers: HeaderMap) -> 
                 pass.anchor.anchor_season,
             ),
             anchor_day: pass.anchor.anchor_day,
+            anchor_season: pass.anchor.anchor_season,
             restart_required_after_selection: true,
         })
         .into_response(),
@@ -1331,10 +1333,14 @@ async fn admin_write_context(
         identity: session.identity.clone(),
         request_seq,
         rpc: rpc.to_owned(),
-        idempotency_key: format!("admin:{rpc}:{request_seq}"),
+        idempotency_key: admin_replay_key(session.nonce, rpc, request_seq),
         committed_at: clock.unix_seconds,
     };
     Ok((session, clock, mutation))
+}
+
+fn admin_replay_key(nonce: i64, rpc: &str, sequence: i64) -> String {
+    format!("admin:{nonce}:{rpc}:{sequence}")
 }
 
 fn mail_enqueue_response(result: Result<i64, ggfm_persistence_sqlite::StoreError>) -> Response {
@@ -1932,6 +1938,29 @@ mod tests {
             fs::remove_file(entry.unwrap().path()).unwrap();
         }
         fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn pass_selection_survives_reused_sequence_after_login_and_rotates_next_day() {
+        let mut db = ggfm_persistence_sqlite::Database::open_memory().unwrap();
+        let clock = DeviceClock::new(1_788_360_000, -360).unwrap();
+        let user = db.ensure_default_slot(clock.unix_seconds).unwrap();
+        let rpc = "memorial.selectPass";
+        for season in [8_i64, 13] {
+            let session = db.begin_login(&season.to_be_bytes(), clock).unwrap();
+            let mutation = RpcMutation {
+                nonce: session.nonce, identity: user.clone(), rpc: rpc.into(),
+                request_seq: 1, committed_at: clock.unix_seconds,
+                idempotency_key: admin_replay_key(session.nonce, rpc, 1),
+            };
+            db.select_pass_season_rpc(&mutation, clock, season).unwrap();
+            db.select_pass_season_rpc(&mutation, clock, season).unwrap();
+            assert_eq!(db.pass_snapshot(user.usn).unwrap().anchor.anchor_season, season);
+        }
+        let tomorrow = DeviceClock::new(clock.unix_seconds + 86_400, -360).unwrap();
+        db.begin_login(b"pass-next-day", tomorrow).unwrap();
+        let anchor = db.pass_snapshot(user.usn).unwrap().anchor;
+        assert_eq!(ggfm_policy_memorial::pass_season(tomorrow, anchor.anchor_day, anchor.anchor_season), 1);
     }
 
     #[tokio::test]

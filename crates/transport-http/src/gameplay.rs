@@ -1324,14 +1324,14 @@ pub async fn execute(
         "setSubscribe" => {
             let seasons = request.integers("I_ids").unwrap_or_default();
             let mutation = mutation(session, rpc, sequence, clock, raw_request)?;
-            let active = state
+            let pass = state
                 .database
-                .execute(move |database| database.activate_passes(&mutation, &seasons))
+                .execute(move |database| {
+                    database.activate_passes(&mutation, &seasons)?;
+                    database.pass_snapshot(mutation.identity.usn)
+                })
                 .await?;
-            let values = active
-                .into_iter()
-                .map(|season| subscribe_wire_value(season, clock.unix_seconds))
-                .collect::<Result<Vec<_>, _>>()?;
+            let values = active_pass_subscriptions(&pass, clock)?;
             Some(response_sparse_struct(
                 spec,
                 schema,
@@ -4091,21 +4091,7 @@ fn response_contents(
             values: quests,
         },
     ));
-    let active_season = pass_season(clock, snapshot.pass.anchor.anchor_day, snapshot.pass.anchor.anchor_season);
-    // Match getGameDataList's device-local daily rotation, not the original
-    // selection anchor. The subscription also starts in the current day.
-    let active_at = clock.local_epoch_day() * 86_400
-        - i64::from(clock.utc_offset_minutes) * 60;
-    let subscriptions = snapshot
-        .pass
-        .premium_seasons
-        .iter()
-        // Entitlement is retained for every season, but the stock client
-        // expects User_subscribe_list to describe the currently active pass,
-        // not thirteen simultaneous subscriptions.
-        .filter(|season| **season == active_season)
-        .map(|season| subscribe_wire_value(*season, active_at))
-        .collect::<Result<Vec<_>, _>>()?;
+    let subscriptions = active_pass_subscriptions(&snapshot.pass, clock)?;
     overrides.push((
         "User_subscribe_list".to_owned(),
         Value::List {
@@ -4606,6 +4592,16 @@ fn user_reward_wire_value(reward: &RewardGrant) -> Result<Value, ProtocolEnvelop
             ("Reward_value".into(), Value::Double(reward.amount)),
         ],
     )
+}
+
+fn active_pass_subscriptions(pass: &ggfm_domain::PassSnapshot, clock: DeviceClock) -> Result<Vec<Value>, ProtocolEnvelopeError> {
+    let season = pass_season(clock, pass.anchor.anchor_day, pass.anchor.anchor_season);
+    let midnight = clock.local_epoch_day() * 86_400 - i64::from(clock.utc_offset_minutes) * 60;
+    if pass.premium_seasons.contains(&season) {
+        Ok(vec![subscribe_wire_value(season, midnight)?])
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn subscribe_wire_value(season: i64, active_at: i64) -> Result<Value, ProtocolEnvelopeError> {
