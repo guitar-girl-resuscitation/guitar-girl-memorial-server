@@ -7,6 +7,24 @@ pub const PASS_SEASONS: i64 = 13;
 pub const SKILL_RESET_SECONDS: i64 = 5 * 60;
 pub const ENCORE_BASE_SECONDS: f64 = 60.0 * 60.0;
 
+/// Level-10 guest bonus pool per broadcast. Calibrated against a three-guest
+/// party (Lily/guests 10, recommended music 25); independent of the star cutoffs.
+pub fn ch3_guest_bonus(stage_id: i64, hinted_slots: usize, level: i32, base_score: i32) -> i32 {
+    if hinted_slots == 0 || base_score <= 0 || level <= 0 { return 0; }
+    let slots = hinted_slots.min(3) as i64;
+    let pool: i64 = match stage_id {
+        1017 => 100, 1019 => 300,
+        2002 => 450, 2004 => 800, 2007 => 1150, 2009 => 1500, 2010 => 1850,
+        2012 => 2650, 2014 => 3500, 2016 => 4350, 2018 => 5200, 2020 => 6100,
+        _ => 0, // Early broadcasts use the ordinary 20% hint bonus.
+    };
+    let half_level_bonus = (pool + slots - 1) / slots;
+    let level = i64::from(level.min(20));
+    let percent = if level <= 10 { level * level } else { 100 + 5 * (level - 10) };
+    let scaled = half_level_bonus * percent / 100;
+    scaled.max(i64::from(base_score) / 5).min(i64::from(i32::MAX)) as i32
+}
+
 pub fn costume_fan_bonus(area: i32, is_default: bool, official: f64, category_max: f64) -> f64 {
     if is_default { official } else if area == 1 { 0.30 } else { category_max }
 }

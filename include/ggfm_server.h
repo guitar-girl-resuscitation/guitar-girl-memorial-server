@@ -9,6 +9,7 @@ extern "C" {
 #endif
 
 uint32_t ggfm_server_abi_version(void);
+int32_t ggfm_ch3_guest_bonus(int64_t stage_id, uint32_t hinted_slots, int32_t level, int32_t base_score);
 const char *ggfm_server_policy_sha256(void);
 int32_t ggfm_server_start(const char *data_dir_utf8, void *android_asset_manager,
                           int64_t device_unix_seconds,

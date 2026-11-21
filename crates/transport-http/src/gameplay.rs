@@ -3150,8 +3150,10 @@ fn calculate_ch3_score(
         .unwrap_or("")
         .split(|character: char| !character.is_ascii_digit())
         .filter_map(|part| part.parse::<i64>().ok())
-        .filter(|id| *id > 0 && seen.insert(*id));
+        .filter(|id| *id > 0 && seen.insert(*id))
+        .take(3);
     let mut follower_score = 0_i32;
+    let mut bonus_score = bonus_music_score;
     let mut bonus_profile_ids = Vec::new();
     let mut profile_scores = Vec::new();
     for profile_id in selected {
@@ -3163,16 +3165,19 @@ fn calculate_ch3_score(
             .map_or(1, |profile| profile.level);
         let score = score_at(level).map_or(0, |row| row.follower_score);
         follower_score = follower_score.saturating_add(score);
-        if stage.bonus_profile_ids.contains(&profile_id) {
+        let guest_bonus = if stage.bonus_profile_ids.contains(&profile_id) {
             bonus_profile_ids.push(profile_id as i32);
-        }
+            ggfm_policy_memorial::ch3_guest_bonus(
+                stage.id, stage.bonus_profile_ids.len(), level, score,
+            )
+        } else { 0 };
+        bonus_score = bonus_score.saturating_add(guest_bonus);
         profile_scores.push(Ch3ProfileScore {
             profile_id: profile_id as i32,
             score,
-            bonus_score: 0,
+            bonus_score: guest_bonus,
         });
     }
-    let bonus_score = bonus_music_score;
     let total_score = i64::from(character_score)
         + i64::from(music_score)
         + i64::from(follower_score)
@@ -5357,6 +5362,41 @@ fn civil_from_days(days_since_epoch: i64) -> (i32, i32, i32) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires GGFM_ORIGINAL_MASTER extracted from v8"]
+    fn hinted_half_level_party_can_three_star_every_broadcast() {
+        use ggfm_domain::{ContentLevelSnapshot, FollowerProfileSnapshot};
+        let path = std::path::PathBuf::from(std::env::var_os("GGFM_ORIGINAL_MASTER").unwrap());
+        let master = ggfm_master_data::MasterData::open_read_only(&path).unwrap().load_catalog().unwrap();
+        let mut db = ggfm_persistence_sqlite::Database::open_memory().unwrap();
+        let player = db.ensure_default_slot(100).unwrap();
+        db.begin_login(b"broadcast-test", DeviceClock::new(100, 0).unwrap()).unwrap();
+        let mut snapshot = db.player_snapshot(player.usn).unwrap();
+        let mut broadcasts = 0;
+        for stage in master.ch3_stages.iter().filter(|stage| stage.active && !is_story(stage)) {
+            let mut guests = stage.bonus_profile_ids.iter().copied().take(3).collect::<Vec<_>>();
+            for id in [1, 2, 3, 4] {
+                if guests.len() == 3 { break; }
+                if !guests.contains(&id) { guests.push(id); }
+            }
+            snapshot.ch3.profiles = guests.iter().copied().chain([100_000]).map(|profile_id|
+                FollowerProfileSnapshot {profile_id, level:10, experience:0, add_candy:0}).collect();
+            snapshot.content_levels = vec![ContentLevelSnapshot {kind:ContentKind::Music,
+                content_id:stage.bonus_music_id, level:25, reward_level:0}];
+            let ids = guests.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+            let request = NamedRequest {call:"chThirdStage".into(), raw_fields:vec![], fields:BTreeMap::from([
+                ("Music_id".into(),Value::I32(stage.bonus_music_id as i32)), ("Profile_ids".into(),text(&ids))])};
+            let score = calculate_ch3_score(&master,&snapshot,stage,&request).unwrap();
+            assert_eq!(score.star,3,"stage {}",stage.id);
+            assert_eq!(score.bonus_score,score.bonus_music_score +
+                score.profile_scores.iter().map(|s| s.bonus_score).sum::<i32>());
+            if stage.id == 2018 { assert_eq!(score.total_score,6840); }
+            if stage.id == 2020 { assert_eq!(score.total_score,7742); }
+            broadcasts += 1;
+        }
+        assert_eq!(broadcasts,20);
+    }
+
     use super::*;
     use ggfm_persistence_sqlite::{Database, DatabaseActor};
 

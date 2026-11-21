@@ -543,3 +543,7 @@ unsafe extern "C" {
     fn AAsset_getLength64(asset: *mut c_void) -> i64;
     fn AAsset_close(asset: *mut c_void);
 }
+#[unsafe(no_mangle)]
+pub extern "C" fn ggfm_ch3_guest_bonus(stage_id: i64, hinted_slots: u32, level: i32, base_score: i32) -> i32 {
+    ggfm_policy_memorial::ch3_guest_bonus(stage_id, hinted_slots as usize, level, base_score)
+}
