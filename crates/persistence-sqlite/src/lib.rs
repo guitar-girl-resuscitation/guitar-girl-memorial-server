@@ -1321,6 +1321,16 @@ impl Database {
         })
     }
 
+    pub fn completed_teacher_ad(&self, usn: Usn) -> Result<bool, StoreError> {
+        Ok(self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM quest_conditions WHERE usn=?1 AND chain_id=1 AND stage_id=4 AND condition_id=2 AND claimed=0 AND quantity>=1 AND stage_id=(SELECT MAX(stage_id) FROM follower_quests WHERE usn=?1 AND chain_id=1) )",
+            [usn], |r| r.get(0))?)
+    }
+
+    pub fn record_skill_reset_ad(&mut self, mutation: &RpcMutation) -> Result<(), StoreError> {
+        self.commit_rpc_mutation(mutation, |tx| record_rewarded_ad(tx, mutation.identity.usn, None))
+    }
+
     pub fn grant_ad_reward(
         &mut self,
         mutation: &RpcMutation,
@@ -1351,6 +1361,7 @@ impl Database {
                     &profile.level_thresholds,
                 )?)
             } else { None };
+            record_rewarded_ad(tx, usn, None)?;
             let result=AdRewardOutcome { ad_id,day_count,total_count,last_view_time,rewards:applied,profile };
             let mut replay=result.clone(); replay.rewards.clear();
             Ok((result,Some(replay)))
@@ -2861,6 +2872,7 @@ impl Database {
             let ad_level = ad_progression
                 .as_ref()
                 .map(|progression| {
+                    record_rewarded_ad(tx, mutation.identity.usn, Some(progression.group_id))?;
                     advance_ad_level(tx, mutation.identity.usn, progression)
                 })
                 .transpose()?;
@@ -3616,6 +3628,26 @@ fn quest_snapshot(
         }
     }
     Ok(result)
+}
+
+// v8 guide: teacher task 2 is ADViewCount; the following stage distinguishes
+// free chocolate and free likes. Each has a target of one, with independent claims.
+fn record_rewarded_ad(tx: &rusqlite::Transaction<'_>, usn: Usn, shop_group: Option<i64>) -> Result<(), StoreError> {
+    let stage: Option<i64> = tx.query_row(
+        "SELECT stage_id FROM follower_quests WHERE usn=?1 AND chain_id=1 ORDER BY stage_id DESC LIMIT 1",
+        [usn], |r| r.get(0)).optional()?;
+    let (stage, condition) = match (stage, shop_group) {
+        (Some(4), _) => (4, 2),
+        (Some(5), Some(200010)) => (5, 1),
+        (Some(5), Some(210010)) => (5, 2),
+        _ => return Ok(()),
+    };
+    tx.execute("INSERT INTO quest_conditions(usn,chain_id,stage_id,condition_id,quantity,claimed)
+        SELECT usn,chain_id,stage_id,?3,1,0 FROM follower_quests
+        WHERE usn=?1 AND chain_id=1 AND stage_id=?2 AND completed=0
+        ON CONFLICT(usn,chain_id,stage_id,condition_id) DO UPDATE SET quantity=MAX(quantity,1) WHERE claimed=0",
+        params![usn,stage,condition])?;
+    Ok(())
 }
 
 fn ad_level_snapshot(
@@ -5296,6 +5328,39 @@ mod tests {
         assert!(replay.rewards.is_empty());
         assert_eq!(replay.chocolate, 10.0);
         assert_eq!(replay.candy, 3.0);
+    }
+
+    #[test]
+    fn rewarded_ad_guide_only_advances_on_committed_current_stage_events() {
+        let (mut db, user) = setup();
+        let session = db.begin_login(b"teacher", DeviceClock::new(700, 0).unwrap()).unwrap();
+        let enter = |db: &Database, stage| {
+            db.connection.execute("INSERT INTO follower_quests(usn,chain_id,stage_id,updated_at) VALUES(?1,1,?2,700)",
+                params![user.usn,stage]).unwrap();
+        };
+        let mutation = |seq| RpcMutation {nonce:session.nonce, identity:user.clone(), request_seq:seq,
+            rpc:"buyShop".into(), idempotency_key:format!("ad:{seq}"), committed_at:700+seq};
+        let purchase = |seq, group:Option<i64>, cost| RewardPurchaseCommand {
+            transaction_id:format!("shop:{seq}"), purchase_kind:"shop".into(),target_id:3,cost,
+            rewards:vec![RewardGrant{reward_type:1,reward_id:1,amount:10.0}],
+            ad_progression:group.map(|group_id|AdLevelProgression{group_id, thresholds:vec![(1,0)]})};
+        enter(&db,4);
+        db.purchase_rewards(&mutation(1),purchase(1,None,None)).unwrap();
+        assert!(!db.completed_teacher_ad(user.usn).unwrap());
+        assert!(db.purchase_rewards(&mutation(2),purchase(2,Some(200010),Some((CurrencyKind::Candy,1e18)))).is_err());
+        assert!(!db.completed_teacher_ad(user.usn).unwrap());
+        db.purchase_rewards(&mutation(3),purchase(3,Some(200010),None)).unwrap();
+        let retry = db.purchase_rewards(&mutation(3),purchase(3,Some(200010),None)).unwrap();
+        assert!(retry.rewards.is_empty() && db.completed_teacher_ad(user.usn).unwrap());
+        let reset = RpcMutation {rpc:"memorial.skillResetAd".into(), ..mutation(4)};
+        db.record_skill_reset_ad(&reset).unwrap();
+        db.record_skill_reset_ad(&reset).unwrap();
+        assert_eq!(db.player_snapshot(user.usn).unwrap().follower_quests.last().unwrap().condition_values,[0.,1.,0.]);
+        enter(&db,5);
+        db.purchase_rewards(&mutation(5),purchase(5,Some(210010),None)).unwrap();
+        db.begin_login(b"teacher-return", DeviceClock::new(800,0).unwrap()).unwrap();
+        assert!(!db.completed_teacher_ad(user.usn).unwrap());
+        assert_eq!(db.player_snapshot(user.usn).unwrap().follower_quests.last().unwrap().condition_values,[0.,1.,0.]);
     }
 
     #[test]

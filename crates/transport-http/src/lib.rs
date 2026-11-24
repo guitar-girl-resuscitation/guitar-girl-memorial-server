@@ -353,6 +353,8 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, String> {
         .route("/healthz", get(health))
         .route("/memorial/notice/{locale}", get(memorial_notice))
         .route("/memorial/v1/session", get(current_session))
+        .route("/memorial/v1/events/teacher-ad", get(teacher_ad_event))
+        .route("/memorial/v1/events/skill-reset-ad", post(skill_reset_ad_event))
         .route("/memorial/v1/slots", get(list_slots).post(create_slot))
         .route(
             "/memorial/v1/slots/{usn}",
@@ -986,6 +988,30 @@ async fn current_session(State(state): State<AppState>, headers: HeaderMap) -> R
         master_source_tables: state.master.metadata.source_table_count,
     })
     .into_response()
+}
+
+async fn teacher_ad_event(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !authorized(&state, &headers) { return StatusCode::UNAUTHORIZED.into_response(); }
+    let Some(session) = state.session.lock().await.clone() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    match state.database.execute(move |db| db.completed_teacher_ad(session.identity.usn)).await {
+        Ok(true) => "rewardedAdCompleted".into_response(),
+        Ok(false) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => internal_error(error),
+    }
+}
+
+async fn skill_reset_ad_event(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !authorized(&state, &headers) { return StatusCode::UNAUTHORIZED.into_response(); }
+    let (_, _, mutation) = match admin_write_context(&state, &headers, "memorial.skillResetAd").await {
+        Ok(context) => context,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    match state.database.execute(move |db| db.record_skill_reset_ad(&mutation)).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => admin_mutation_error(error),
+    }
 }
 
 async fn list_slots(State(state): State<AppState>, headers: HeaderMap) -> Response {
