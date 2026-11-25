@@ -1099,13 +1099,14 @@ pub async fn execute(
                 .rewards(reward_group)
                 .map(|row| RewardGrant {
                     reward_type: row.reward_type,
-                    reward_id: row.reward_id,
+                    reward_id: shop_reward_id(row.group, row.reward_type, row.reward_id),
                     amount: row.quantity,
                 })
                 .collect();
             let permanent = rewards
                 .iter()
-                .any(|reward| matches!(reward.reward_type, 2..=5 | 7..=10));
+                .any(|reward| matches!(reward.reward_type, 2..=5 | 7..=10)
+                    || (reward.reward_type, reward.reward_id) == (6, 1));
             let receipt = request
                 .string("Purchase_id")
                 .filter(|value| !value.is_empty())
@@ -3629,6 +3630,8 @@ fn player_response_projected(
                 text(&snapshot.last_save_time.to_string()),
             ),
             ("U_review_popup".into(), text("N")),
+            ("U_retain_continuous_tap".into(), Value::I16(i16::from(snapshot.owned_content.iter()
+                .any(|row| row.kind == ContentKind::Buff && row.content_id == 1)))),
             ("Device_uuid".into(), text(&snapshot.device_uuid)),
         ],
     )?;
@@ -3852,7 +3855,9 @@ fn user_contents(snapshot: &PlayerSnapshot, clock: DeviceClock) -> Result<Value,
                 vec![
                     ("I_id".into(), Value::I64(owned.content_id)),
                     ("I_Level".into(), Value::I64(level)),
-                    ("I_ActiveTime".into(), Value::I64(timer.map_or(0, |timer| timer.active_at))),
+                    // The stock permanent Auto Tap loader uses ActiveTime > 0.
+                    ("I_ActiveTime".into(), Value::I64(if owned.content_id == 1 { 1 }
+                        else { timer.map_or(0, |timer| timer.active_at) })),
                     ("I_EndTime".into(), Value::I64(timer.map_or(0, |timer| timer.expires_at))),
                 ]
             }),
@@ -4995,6 +5000,12 @@ fn variety_store_wire_value(row: &VarietyStoreRow) -> Result<Value, GameplayErro
     )?)
 }
 
+// In 8.0.0 the active Continuous Tap product points at attendance buff 5.
+// The long-press coroutine and the stock receipt handler both require buff 1.
+fn shop_reward_id(group: i64, kind: i16, id: i32) -> i32 {
+    if (group, kind, id) == (95008, 6, 5) { 1 } else { id }
+}
+
 fn transform_master_value(
     state: &AppState,
     table: &str,
@@ -5013,6 +5024,11 @@ fn transform_master_value(
         return value;
     }
     match (table, field) {
+        ("Reward_group", "rewardid") => scalar_like(source, f64::from(shop_reward_id(
+            master_i64(row, "group").unwrap_or_default(),
+            to_i16(master_i64(row, "rewardtype").unwrap_or_default()),
+            to_i32(master_i64(row, "rewardid").unwrap_or_default()),
+        ))),
         // getGameDataList replaces the bundled client catalog at login. Publish
         // effective fill amounts here too, without mutating the original master
         // used by paidEventPoint (which applies the multiplier exactly once).
@@ -5544,6 +5560,46 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn continuous_tap_purchase_and_returning_owner_use_the_native_auto_tap_buff() {
+        let clock = DeviceClock::new(500, 0).unwrap();
+        let mut db = Database::open_memory().unwrap();
+        let user = db.ensure_default_slot(500).unwrap();
+        let session = db.begin_login(b"tap", clock).unwrap();
+        let check = |snapshot: &PlayerSnapshot, active: bool| {
+            let schema = ProtocolSchema::embedded();
+            let reply = player_response_projected(schema.call("userLoad").unwrap(), snapshot, true, clock).unwrap();
+            assert_eq!(value_integer(nested_field(nested_field(&reply, 1).unwrap(), 12)),
+                Some(i64::from(active)));
+            let contents = user_contents(snapshot, clock).unwrap();
+            let id = schema.type_spec("user_model::UserContentsData").unwrap().fields.iter()
+                .find(|f| f.name == "User_buff").unwrap().id;
+            let rows = list_values(nested_field(&contents, id));
+            let buff = rows.iter().find(|r| value_integer(nested_field(r, 1)) == Some(1));
+            assert_eq!(buff.and_then(|r| value_integer(nested_field(r, 3))), active.then_some(1));
+        };
+        let command = |id| RewardPurchaseCommand { transaction_id: "shop:50008".into(),
+            purchase_kind: "shop".into(), target_id: 50008, cost: None, ad_progression: None,
+            rewards: vec![RewardGrant { reward_type: 6, reward_id: id, amount: 1.0 }] };
+        let rpc = mutation(&session, "buyShop", Some(1), clock, b"tap").unwrap();
+        // Simulate a purchase recorded by an older build.
+        db.purchase_rewards(&rpc, command(5)).unwrap();
+        check(&db.player_snapshot(user.usn).unwrap(), false);
+        db.begin_login(b"tap-return", clock).unwrap();
+        check(&db.player_snapshot(user.usn).unwrap(), true);
+        let fresh = db.create_slot("fresh", 500).unwrap();
+        db.request_switch(fresh.usn).unwrap();
+        let session = db.begin_login(b"fresh-tap", clock).unwrap();
+        check(&db.player_snapshot(fresh.usn).unwrap(), false);
+        let id = shop_reward_id(95008, 6, 5);
+        let rpc = mutation(&session, "buyShop", Some(1), clock, b"fresh").unwrap();
+        let receipt = db.purchase_rewards(&rpc, command(id)).unwrap();
+        assert_eq!(receipt.rewards, command(1).rewards);
+        check(&db.player_snapshot(fresh.usn).unwrap(), true);
+        assert!(db.purchase_rewards(&rpc, command(id)).unwrap().rewards.is_empty());
+        assert_eq!(shop_reward_id(123, 6, 5), 5);
     }
 
     #[test]

@@ -552,6 +552,14 @@ impl Database {
         )?;
         tx.execute("INSERT INTO login_sessions(nonce,usn,capability_hash,started_at,device_time,utc_offset_minutes) VALUES(?1,?2,?3,?4,?4,?5)", params![nonce,usn,capability_hash,clock.unix_seconds,clock.utc_offset_minutes])?;
         let local_day = clock.local_epoch_day();
+        // Builds before the reward correction stored attendance buff 5 for
+        // shop item 50008. Only a completed purchase proves this entitlement.
+        tx.execute(
+            "INSERT OR IGNORE INTO owned_content(usn,kind,area,content_id,acquired_at,source)
+             SELECT usn,'buff',0,1,created_at,'shop' FROM purchase_transactions
+             WHERE usn=?1 AND purchase_kind='shop' AND target_id=50008 AND status='complete'
+             ORDER BY created_at LIMIT 1", [usn],
+        )?;
         let season = local_day.rem_euclid(13) + 1;
         tx.execute(
             concat!(
