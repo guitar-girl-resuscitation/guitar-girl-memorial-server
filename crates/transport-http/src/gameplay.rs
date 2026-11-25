@@ -918,7 +918,6 @@ pub async fn execute(
                 scaled_requirement(row.unlock_cost, false)
             };
             let area = row.area;
-            let max_level = i64::from(row.max_level.max(1));
             let mutation = mutation(session, rpc, sequence, clock, raw_request)?;
             let result = state
                 .database
@@ -932,7 +931,9 @@ pub async fn execute(
                             currency,
                             price,
                             price_increment: 0.0,
-                            max_level,
+                            // buyMusic unlocks the track. Subsequent levels are
+                            // applied by LevelUpMusic and persisted via userSave.
+                            max_level: 1,
                         },
                     )
                 })
@@ -5926,6 +5927,49 @@ mod tests {
 
         drop(state);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn repeated_music_unlocks_charge_once_and_preserve_the_saved_song_level() {
+        let clock = DeviceClock::new(500, 0).unwrap();
+        let mut master = ggfm_master_data::MasterCatalog::default();
+        master.music.push(ggfm_master_data::MusicRow {
+            id: 12, area: 1, max_level: 50, currency: "CP".into(), unlock_cost: 100.0,
+            acquisition_type: 0, acquisition_id: 0, active: true,
+        });
+        let database = DatabaseActor::open(":memory:".into()).unwrap();
+        let session = database.execute(move |db| {
+            let user = db.ensure_default_slot(500)?;
+            db.grant_currency(user.usn, CurrencyKind::Chocolate, 100.0, "seed", 500)?;
+            db.begin_login(b"music-unlock", clock)
+        }).await.unwrap();
+        let state = AppState {
+            database, master: master.into(), session: Default::default(),
+            capability: "test".into(), capability_hash: Vec::new().into(),
+            endpoint: "http://127.0.0.1:1".into(), asset_source: None,
+            startup_notice_emitted: Default::default(),
+        };
+        let buy = request("buyMusic", BTreeMap::from([("Idx".into(), Value::I32(12))]));
+        let save = request("userSave", BTreeMap::from([("User_music".into(), Value::List {
+            element_type: STRUCT,
+            values: vec![Value::Struct(vec![
+                ggfm_protocol::Field { id: 1, value: Value::I64(12) },
+                ggfm_protocol::Field { id: 2, value: Value::I64(2) },
+            ])],
+        })]));
+        let usn = session.identity.usn;
+        for seq in 1..=7 {
+            let (rpc, request) = if seq == 6 { (RpcName::UserSave, &save) }
+                else { (RpcName::BuyMusic, &buy) };
+            execute(&state, &session, GameplayCall {
+                rpc, locale: "en", request, clock, sequence: Some(seq), raw_request: &[],
+            }).await.unwrap();
+            let snapshot = state.database.execute(move |db| db.player_snapshot(usn)).await.unwrap();
+            let song = snapshot.content_levels.iter().find(|row|
+                row.kind == ContentKind::Music && row.content_id == 12).unwrap();
+            assert_eq!(song.level, if seq < 6 { 1 } else { 2 }, "request {seq}");
+            assert_eq!(snapshot.currency(CurrencyKind::Chocolate), 90.0);
+        }
     }
 
     #[cfg(ggfm_private_oracle)]
