@@ -2941,6 +2941,9 @@ impl Database {
                 )
                 .optional()?
                 .unwrap_or(0);
+            // The client grants skill level one at the character-level threshold.
+            // buyContents is the paid upgrade, so its first target is level two.
+            let current_level = current_level.max(i64::from(kind == ContentKind::Skill));
             if current_level >= max_level.max(1) {
                 let balances = currency_balances(tx, mutation.identity.usn)?;
                 return Ok(ContentPurchaseOutcome {
@@ -5466,7 +5469,7 @@ mod tests {
             (ContentKind::Unit, 3, 6, 3.8, 1, 20.0),
         ] {
             let mut last_cost = 0.0;
-            for target in 1..=maximum {
+            for target in offset..=maximum {
                 seq += 1;
                 let mutation = RpcMutation { nonce: session.nonce, identity: identity.clone(),
                     request_seq: seq, rpc: "buyContents".into(), idempotency_key: format!("curve:{seq}"), committed_at: 500 + seq };
@@ -5547,7 +5550,7 @@ mod tests {
                 },
             )
             .unwrap();
-        assert_eq!(content.level, 1);
+        assert_eq!(content.level, 2);
         assert_eq!(content.chocolate, 11.0);
 
         let maxed = db
@@ -5560,11 +5563,11 @@ mod tests {
                     currency: CurrencyKind::Chocolate,
                     price: 9.0,
                     price_increment: 0.0,
-                    max_level: 1,
+                    max_level: 2,
                 },
             )
             .unwrap();
-        assert_eq!(maxed.level, 1);
+        assert_eq!(maxed.level, 2);
         assert_eq!(maxed.chocolate, 11.0);
 
         let reward = RewardGrant {
