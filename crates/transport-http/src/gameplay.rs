@@ -1053,6 +1053,11 @@ pub async fn execute(
                 .master
                 .shop(shop_id)
                 .ok_or_else(|| GameplayError::Invalid(format!("unknown shop item {shop_id}")))?;
+            let cost = match shop.sell_type {
+                1 => Some((CurrencyKind::Chocolate, shop.sell_value as f64)),
+                0 | 2 => None, // Free/ad items and memorial replacements for real-money purchases.
+                other => return Err(GameplayError::Invalid(format!("unsupported Shop sell type {other}"))),
+            };
             let ad_progression = (shop.product_type == 5
                 && state
                     .master
@@ -1106,12 +1111,12 @@ pub async fn execute(
                         .string("Purchase_token")
                         .filter(|value| !value.is_empty())
                 });
-            let purchase_id = receipt.map_or_else(
+            let purchase_id = receipt.filter(|_| shop.sell_type == 2).map_or_else(
                 || {
                     if permanent {
                         format!("shop-once:{shop_id}")
                     } else {
-                        format!("shop:{shop_id}:{}", sequence.unwrap_or_default())
+                        format!("shop:{shop_id}:{}:{}", session.nonce, sequence.unwrap_or_default())
                     }
                 },
                 |value| format!("receipt:{value}"),
@@ -1126,7 +1131,7 @@ pub async fn execute(
                             transaction_id: purchase_id,
                             purchase_kind: "shop".into(),
                             target_id: shop_id,
-                            cost: None,
+                            cost,
                             rewards,
                             ad_progression,
                         },
@@ -5969,6 +5974,50 @@ mod tests {
 
         drop(state);
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn chocolate_shop_purchase_requires_funds_and_charges_once_per_purchase() {
+        let clock = DeviceClock::new(500, 0).unwrap();
+        let mut master = ggfm_master_data::MasterCatalog::default();
+        master.shops.push(ggfm_master_data::ShopRow {
+            id: 13, product_type: 4, reward_group: 13, sell_type: 1, sell_value: 100,
+            active: true, condition: 0, condition_value: 0,
+        });
+        master.reward_groups.push(ggfm_master_data::RewardGroupRow {
+            row_id: 13, group: 13, reward_type: 1, reward_id: 3, quantity: 50.0, first_purchase_quantity: 0.0,
+        });
+        let database = DatabaseActor::open(":memory:".into()).unwrap();
+        let mut session = database.execute(move |db| {
+            let user = db.ensure_default_slot(500)?;
+            db.grant_currency(user.usn, CurrencyKind::Chocolate, 99.0, "initial", 500)?;
+            db.begin_login(b"shop", clock)
+        }).await.unwrap();
+        let state = AppState {
+            database, master: master.into(), session: Default::default(), capability: "test".into(),
+            capability_hash: Vec::new().into(), endpoint: "http://127.0.0.1:1".into(),
+            asset_source: None, startup_notice_emitted: Default::default(),
+        };
+        let usn = session.identity.usn;
+        let req = request("buyShop", BTreeMap::from([("Idx".into(), Value::I32(13))]));
+        let call = || GameplayCall { rpc: RpcName::BuyShop, locale: "en", request: &req,
+            clock, sequence: Some(1), raw_request: &[] };
+        let balances = || state.database.execute(move |db| Ok((
+            db.currency(usn, CurrencyKind::Chocolate)?, db.currency(usn, CurrencyKind::Ch1Like)?,
+        )));
+        assert!(execute(&state, &session, call()).await.is_err());
+        assert_eq!(balances().await.unwrap(), (99.0, 0.0));
+        state.database.execute(move |db| db.grant_currency(usn, CurrencyKind::Chocolate, 1.0, "topup", 500)).await.unwrap();
+        for _ in 0..2 {
+            execute(&state, &session, call()).await.unwrap();
+            assert_eq!(balances().await.unwrap(), (0.0, 50.0));
+        }
+        session = state.database.execute(move |db| {
+            db.grant_currency(usn, CurrencyKind::Chocolate, 100.0, "next-session", 501)?;
+            db.begin_login(b"shop-again", clock)
+        }).await.unwrap();
+        execute(&state, &session, call()).await.unwrap();
+        assert_eq!(balances().await.unwrap(), (0.0, 100.0));
     }
 
     #[tokio::test]
