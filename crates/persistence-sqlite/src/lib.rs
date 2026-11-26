@@ -2920,6 +2920,7 @@ impl Database {
         command: ContentPurchaseCommand,
     ) -> Result<ContentPurchaseOutcome, StoreError> {
         let ContentPurchaseCommand {
+            auto_unlock_level,
             kind,
             area,
             content_id,
@@ -2941,9 +2942,20 @@ impl Database {
                 )
                 .optional()?
                 .unwrap_or(0);
-            // The client grants skill level one at the character-level threshold.
-            // buyContents is the paid upgrade, so its first target is level two.
-            let current_level = current_level.max(i64::from(kind == ContentKind::Skill));
+            // In 8.0.0 the two character IDs match the chapter numbers. The
+            // skill's master row supplies both its chapter and its unlock level.
+            let current_level = if let Some(required) = auto_unlock_level {
+                let character_level = tx.query_row(
+                    "SELECT level FROM content_levels WHERE usn=?1 AND kind='character' AND content_id=?2",
+                    params![mutation.identity.usn, area], |row| row.get::<_, i64>(0),
+                ).optional()?.unwrap_or(0);
+                if character_level < required {
+                    return Err(DomainError::Locked.into());
+                }
+                current_level.max(1)
+            } else {
+                current_level
+            };
             if current_level >= max_level.max(1) {
                 let balances = currency_balances(tx, mutation.identity.usn)?;
                 return Ok(ContentPurchaseOutcome {
@@ -5455,6 +5467,31 @@ mod tests {
     }
 
     #[test]
+    fn level_gated_skills_use_their_own_character_while_store_items_start_unowned() {
+        let (mut db, identity) = setup();
+        let session = db.begin_login(b"level-gates", DeviceClock::new(500, 0).unwrap()).unwrap();
+        db.grant_currency(identity.usn, CurrencyKind::Chocolate, 20.0, "seed", 500).unwrap();
+        let mutation = |seq| RpcMutation { nonce: session.nonce, identity: identity.clone(),
+            request_seq: seq, rpc: "buyContents".into(), idempotency_key: format!("gate:{seq}"), committed_at: 500 + seq };
+        let skill = ContentPurchaseCommand { kind: ContentKind::Skill, area: 2, content_id: 22,
+            auto_unlock_level: Some(300), currency: CurrencyKind::Chocolate, price: 2.0, price_increment: 1.0, max_level: 20 };
+        db.connection.execute("UPDATE content_levels SET level=500 WHERE usn=?1 AND kind='character' AND content_id=1", [identity.usn]).unwrap();
+        assert!(matches!(db.purchase_content(&mutation(1), skill.clone()), Err(StoreError::Domain(DomainError::Locked))));
+        let prop = ContentPurchaseCommand { kind: ContentKind::Prop, area: 2, content_id: 202, auto_unlock_level: None, ..skill.clone() };
+        let first = db.purchase_content(&mutation(1), prop.clone()).unwrap();
+        assert_eq!((first.level, first.chocolate), (1, 18.0));
+        let second = db.purchase_content(&mutation(2), prop).unwrap();
+        assert_eq!((second.level, second.chocolate), (2, 15.0));
+        db.connection.execute("INSERT INTO owned_content(usn,kind,area,content_id,acquired_at,source) VALUES(?1,'character',2,2,500,'userSave')", [identity.usn]).unwrap();
+        db.connection.execute("INSERT INTO content_levels(usn,kind,content_id,level) VALUES(?1,'character',2,299)", [identity.usn]).unwrap();
+        assert!(matches!(db.purchase_content(&mutation(3), skill.clone()), Err(StoreError::Domain(DomainError::Locked))));
+        db.connection.execute("UPDATE content_levels SET level=300 WHERE usn=?1 AND kind='character' AND content_id=2", [identity.usn]).unwrap();
+        let upgraded = db.purchase_content(&mutation(3), skill.clone()).unwrap();
+        assert_eq!((upgraded.level, upgraded.chocolate), (2, 13.0));
+        assert_eq!(db.purchase_content(&mutation(3), skill).unwrap(), upgraded);
+    }
+
+    #[test]
     fn premium_upgrade_curve_is_charged_at_transaction_level_and_replay_is_free() {
         let (mut db, identity) = setup();
         let clock = DeviceClock::new(500, 0).unwrap();
@@ -5473,7 +5510,7 @@ mod tests {
                 seq += 1;
                 let mutation = RpcMutation { nonce: session.nonce, identity: identity.clone(),
                     request_seq: seq, rpc: "buyContents".into(), idempotency_key: format!("curve:{seq}"), committed_at: 500 + seq };
-                let command = ContentPurchaseCommand { kind, area: 1, content_id: id,
+                let command = ContentPurchaseCommand { auto_unlock_level: (kind == ContentKind::Skill).then_some(1), kind, area: 1, content_id: id,
                     currency: CurrencyKind::Chocolate, price: 1.0, price_increment: increment, max_level: maximum };
                 let cost = (1.0_f32 + (target - offset).max(0) as f32 * increment as f32).trunc() as f64;
                 assert!(cost >= last_cost && cost <= cap);
@@ -5506,6 +5543,7 @@ mod tests {
         let rejected_content = db.purchase_content(
             &make(1, "buyContents"),
             ContentPurchaseCommand {
+                auto_unlock_level: Some(1),
                 kind: ContentKind::Skill,
                 area: 1,
                 content_id: 2,
@@ -5540,6 +5578,7 @@ mod tests {
             .purchase_content(
                 &make(1, "buyContents"),
                 ContentPurchaseCommand {
+                    auto_unlock_level: Some(1),
                     kind: ContentKind::Skill,
                     area: 1,
                     content_id: 2,
@@ -5557,6 +5596,7 @@ mod tests {
             .purchase_content(
                 &make(2, "buyContents"),
                 ContentPurchaseCommand {
+                    auto_unlock_level: Some(1),
                     kind: ContentKind::Skill,
                     area: 1,
                     content_id: 2,

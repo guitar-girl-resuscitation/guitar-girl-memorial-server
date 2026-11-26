@@ -59,6 +59,7 @@ pub struct GuitarRow {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SkillRow {
+    pub unlock_level: i64,
     pub id: i64,
     pub area: i32,
     pub max_level: i32,
@@ -545,11 +546,12 @@ impl MasterData {
     pub fn skills(&self) -> Result<Vec<SkillRow>, MasterDataError> {
         let mut statement = self.connection.prepare(concat!(
             "SELECT i_Id,i_Area,i_MaxLevel,s_GoodsType,i_Cost,",
-            "f_CostIncreaseValue,f_Cooltime FROM Skill ORDER BY i_Id"
+            "f_CostIncreaseValue,f_Cooltime,i_UnlockLevel FROM Skill ORDER BY i_Id"
         ))?;
         Ok(statement
             .query_map([], |row| {
                 Ok(SkillRow {
+                    unlock_level: row.get(7)?,
                     id: row.get(0)?,
                     area: row.get(1)?,
                     max_level: row.get(2)?,

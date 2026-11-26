@@ -508,6 +508,8 @@ pub struct RewardPurchaseCommand {
 /// Atomic purchase or level-up of a single content record.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContentPurchaseCommand {
+    /// Character level that grants the first skill level without a purchase.
+    pub auto_unlock_level: Option<i64>,
     pub kind: ContentKind,
     pub area: i32,
     pub content_id: i64,

@@ -311,6 +311,7 @@ pub async fn execute(
                     database.purchase_content(
                         &mutation,
                         ContentPurchaseCommand {
+                            auto_unlock_level: None,
                             kind: ContentKind::Prop,
                             area: row.area,
                             content_id: row.reward_id,
@@ -852,18 +853,7 @@ pub async fn execute(
             let result = state
                 .database
                 .execute(move |database| {
-                    database.purchase_content(
-                        &mutation,
-                        ContentPurchaseCommand {
-                            kind: purchase.kind,
-                            area: purchase.area,
-                            content_id: purchase.content_id,
-                            currency: purchase.currency,
-                            price: purchase.price,
-                            price_increment: purchase.price_increment,
-                            max_level: purchase.max_level,
-                        },
-                    )
+                    database.purchase_content(&mutation, purchase)
                 })
                 .await?;
             let mut fields = vec![
@@ -925,6 +915,7 @@ pub async fn execute(
                     database.purchase_content(
                         &mutation,
                         ContentPurchaseCommand {
+                            auto_unlock_level: None,
                             kind: ContentKind::Music,
                             area,
                             content_id,
@@ -4668,17 +4659,6 @@ fn choice_user_value(snapshot: &PlayerSnapshot) -> Result<Value, ProtocolEnvelop
     )
 }
 
-#[derive(Clone, Copy)]
-struct ContentPurchaseSpec {
-    kind: ContentKind,
-    area: i32,
-    content_id: i64,
-    currency: CurrencyKind,
-    price: f64,
-    price_increment: f64,
-    max_level: i64,
-}
-
 fn cosmetic_price_text(currency: &str, official: &str) -> String {
     if official == "0" { return "0".to_owned(); }
     if currency.eq_ignore_ascii_case("GP") || currency.eq_ignore_ascii_case("GP2") {
@@ -4692,7 +4672,7 @@ fn content_purchase_spec(
     state: &AppState,
     requested_kind: &str,
     content_id: i64,
-) -> Result<ContentPurchaseSpec, GameplayError> {
+) -> Result<ContentPurchaseCommand, GameplayError> {
     // The 8.0.0 client uses both display names and save-model names depending
     // on which purchase button initiated the request. Keep the normalization
     // identical to the tested Rust baseline.
@@ -4709,7 +4689,8 @@ fn content_purchase_spec(
                         "costume {content_id} retains its non-shop acquisition source"
                     ))
                 })?;
-            Ok(ContentPurchaseSpec {
+            Ok(ContentPurchaseCommand {
+                auto_unlock_level: None,
                 kind: ContentKind::Costume,
                 area: row.area,
                 content_id,
@@ -4731,7 +4712,8 @@ fn content_purchase_spec(
                         "guitar {content_id} retains its non-shop acquisition source"
                     ))
                 })?;
-            Ok(ContentPurchaseSpec {
+            Ok(ContentPurchaseCommand {
+                auto_unlock_level: None,
                 kind: ContentKind::Guitar,
                 area: row.area,
                 content_id,
@@ -4749,7 +4731,8 @@ fn content_purchase_spec(
                 .iter()
                 .find(|row| row.id == content_id)
                 .ok_or_else(|| GameplayError::Invalid(format!("unknown skill {content_id}")))?;
-            Ok(ContentPurchaseSpec {
+            Ok(ContentPurchaseCommand {
+                auto_unlock_level: Some(row.unlock_level),
                 kind: ContentKind::Skill,
                 area: row.area,
                 content_id,
@@ -4766,7 +4749,8 @@ fn content_purchase_spec(
                 .iter()
                 .find(|row| row.id == content_id)
                 .ok_or_else(|| GameplayError::Invalid(format!("unknown unit {content_id}")))?;
-            Ok(ContentPurchaseSpec {
+            Ok(ContentPurchaseCommand {
+                auto_unlock_level: None,
                 kind: ContentKind::Unit,
                 area: row.area,
                 content_id,
@@ -4797,7 +4781,8 @@ fn content_purchase_spec(
                         "follower {content_id} has no purchase currency"
                     ))
                 })?;
-            Ok(ContentPurchaseSpec {
+            Ok(ContentPurchaseCommand {
+                auto_unlock_level: None,
                 kind: ContentKind::Follower,
                 area,
                 content_id,
@@ -5786,6 +5771,7 @@ mod tests {
         let database = DatabaseActor::open(path.clone()).unwrap();
         let mut master = ggfm_master_data::MasterCatalog {
             skills: vec![ggfm_master_data::SkillRow {
+                unlock_level: 300,
                 id: 2,
                 area: 1,
                 max_level: 20,
