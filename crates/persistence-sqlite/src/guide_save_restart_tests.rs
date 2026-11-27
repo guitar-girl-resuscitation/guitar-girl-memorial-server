@@ -1,4 +1,37 @@
 #[test]
+fn memorial_exchange_advances_only_the_current_spend_task_and_can_be_claimed() {
+    let (mut db, identity) = setup();
+    let clock = DeviceClock::new(500, 0).unwrap();
+    let session = db.begin_login(b"exchange", clock).unwrap();
+    let make = |seq, name: &str| RpcMutation {
+        nonce: session.nonce, identity: identity.clone(), request_seq: seq,
+        rpc: name.into(), idempotency_key: format!("exchange:{seq}:{name}"), committed_at: 500 + seq,
+    };
+    let usn = identity.usn;
+    db.connection.execute("INSERT INTO follower_quests(usn,chain_id,stage_id,updated_at) VALUES(?1,1,8,500)", [usn]).unwrap();
+    let candy = [(8, 3, 50.0), (18, 3, 100.0)];
+    let chocolate = [(2, 2, 100.0)];
+    db.grant_currency(usn, CurrencyKind::Chocolate, 50.0, "seed", 500).unwrap();
+    assert!(matches!(db.exchange_currency(&make(1,"candy"), CurrencyKind::Candy, &candy),
+        Err(StoreError::Domain(DomainError::InsufficientBalance))));
+    assert_eq!(db.exchange_currency(&make(1,"choc"), CurrencyKind::Chocolate, &chocolate).unwrap(), (0.0,1.0));
+    assert_eq!(db.player_snapshot(usn).unwrap().follower_quests.last().unwrap().condition_values, [0.0;3]);
+    db.grant_currency(usn, CurrencyKind::Candy, 49.0, "top-up", 501).unwrap();
+    for _ in 0..2 {
+        assert_eq!(db.exchange_currency(&make(2,"candy"), CurrencyKind::Candy, &candy).unwrap(), (1.0,0.0));
+    }
+    let snapshot = db.player_snapshot(usn).unwrap();
+    let quest = snapshot.follower_quests.last().unwrap();
+    assert_eq!(quest.condition_values, [0.0,0.0,50.0]);
+    assert_eq!(quest.claimed, [false;3]);
+    assert_eq!(snapshot.currency(CurrencyKind::Chocolate), 1.0);
+    let claimed = db.advance_follower_quest(&make(3,"claim"), 8, 3, 0.0, [4.0,900.0,50.0],
+        vec![RewardGrant {reward_type:1,reward_id:1,amount:10.0}], Some(9)).unwrap();
+    assert_eq!(claimed.quest.claimed, [false,false,true]);
+    assert_eq!(db.currency(usn,CurrencyKind::Chocolate).unwrap(),11.0);
+}
+
+#[test]
 fn guide_unclaimed_progress_claims_and_stages_survive_restart() {
     let path = std::env::temp_dir().join(format!("ggfm-guide-save-{}.sqlite",
         SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos()));

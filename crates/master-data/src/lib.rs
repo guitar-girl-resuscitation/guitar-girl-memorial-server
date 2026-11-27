@@ -208,6 +208,7 @@ pub struct FollowerGiftRow {
 #[derive(Clone, Debug, PartialEq)]
 pub struct FollowerQuestRow {
     pub id: i64,
+    pub conditions: [String; 3],
     pub quest_type: i32,
     pub thresholds: [f64; 3],
     pub reward_groups: [i64; 3],
@@ -821,12 +822,14 @@ impl MasterData {
     pub fn follower_quests(&self) -> Result<Vec<FollowerQuestRow>, MasterDataError> {
         let mut statement = self.connection.prepare(concat!(
             "SELECT i_Id,d_Condition1_1,d_Condition2_1,d_Condition3_1,",
-            "i_RewardGroup1,i_RewardGroup2,i_RewardGroup3,b_IsActive,i_Type FROM FollowerQuest ORDER BY i_Id"
+            "i_RewardGroup1,i_RewardGroup2,i_RewardGroup3,b_IsActive,i_Type,",
+            "s_ConditionType1,s_ConditionType2,s_ConditionType3 FROM FollowerQuest ORDER BY i_Id"
         ))?;
         Ok(statement
             .query_map([], |row| {
                 Ok(FollowerQuestRow {
                     id: row.get(0)?,
+                    conditions: [row.get(9)?, row.get(10)?, row.get(11)?],
                     thresholds: [row.get(1)?, row.get(2)?, row.get(3)?],
                     reward_groups: [row.get(4)?, row.get(5)?, row.get(6)?],
                     active: row.get::<_, i64>(7)? != 0,

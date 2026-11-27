@@ -2914,6 +2914,34 @@ impl Database {
         })
     }
 
+    /// A memorial exchange spends 50 units and grants one of the other currency.
+    /// The guide observes the debit only after it succeeds, in the same transaction.
+    pub fn exchange_currency(&mut self, mutation: &RpcMutation, spend: CurrencyKind,
+        conditions: &[(i64, i64, f64)]) -> Result<(f64, f64), StoreError> {
+        let receive = match spend {
+            CurrencyKind::Candy => CurrencyKind::Chocolate,
+            CurrencyKind::Chocolate => CurrencyKind::Candy,
+            _ => return Err(DomainError::InvalidAmount.into()),
+        };
+        self.commit_rpc_mutation(mutation, |tx| {
+            let usn = mutation.identity.usn;
+            deduct_currency(tx, usn, spend, 50.0)?;
+            gp::credit_currency(tx, usn, receive, 1.0)?;
+            let stage: Option<i64> = tx.query_row(
+                "SELECT MAX(stage_id) FROM follower_quests WHERE usn=?1 AND chain_id=1",
+                [usn], |row| row.get(0))?;
+            for &(id, condition, goal) in conditions.iter().filter(|r| Some(r.0) == stage) {
+                tx.execute("INSERT INTO quest_conditions(usn,chain_id,stage_id,condition_id,quantity,claimed)
+                    SELECT usn,chain_id,stage_id,?3,MIN(50.0,?4),0 FROM follower_quests
+                    WHERE usn=?1 AND chain_id=1 AND stage_id=?2 AND completed=0
+                    ON CONFLICT(usn,chain_id,stage_id,condition_id) DO UPDATE SET
+                    quantity=MIN(?4,quest_conditions.quantity+50) WHERE claimed=0 AND quest_conditions.quantity<?4",
+                    params![usn,id,condition,goal])?;
+            }
+            currency_balances(tx, usn)
+        })
+    }
+
     pub fn purchase_content(
         &mut self,
         mutation: &RpcMutation,

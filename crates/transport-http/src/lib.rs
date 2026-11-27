@@ -362,6 +362,7 @@ pub async fn start(config: ServerConfig) -> Result<ServerHandle, String> {
         )
         .route("/memorial/v1/slots/{usn}/select", post(select_slot))
         .route("/memorial/v1/legacy-items", get(list_legacy_items))
+        .route("/memorial/v1/exchange/{kind}", post(exchange_currency))
         .route(
             "/memorial/v1/legacy-items/{kind}/{area}/{id}/mail",
             post(send_legacy_item),
@@ -1221,6 +1222,33 @@ async fn send_legacy_item(
 #[derive(Deserialize)]
 struct CurrencyMailRequest {
     amount: String,
+}
+
+async fn exchange_currency(State(state): State<AppState>, Path(kind): Path<String>, headers: HeaderMap) -> Response {
+    if !authorized(&state, &headers) { return StatusCode::UNAUTHORIZED.into_response(); }
+    let (spend, event) = match kind.as_str() {
+        "candy" => (CurrencyKind::Candy, "SpendCandyCount"),
+        "chocolate" => (CurrencyKind::Chocolate, "SpendChochoCount"),
+        _ => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let (_, _, mutation) = match admin_write_context(&state, &headers, event).await {
+        Ok(context) => context, Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    let mut matches = Vec::new();
+    for row in state.master.follower_quests.iter().filter(|row| row.active) {
+        for (i, condition) in row.conditions.iter().enumerate() {
+            if condition == event { matches.push((row.id, (i+1) as i64, row.thresholds[i])); }
+        }
+    }
+    match state.database.execute(move |db| db.exchange_currency(&mutation, spend, &matches)).await {
+        Ok((chocolate,candy)) => {
+            runtime_log(&format!("diag memorial exchange event={event} spent=50 received=1"));
+            Json(serde_json::json!({"chocolate":chocolate,"candy":candy})).into_response()
+        }
+        Err(StoreError::Domain(ggfm_domain::DomainError::InsufficientBalance)) =>
+            (StatusCode::UNPROCESSABLE_ENTITY, "insufficient balance").into_response(),
+        Err(error) => admin_mutation_error(error),
+    }
 }
 
 async fn send_currency_mail(
